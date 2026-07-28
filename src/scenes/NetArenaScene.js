@@ -807,6 +807,12 @@ export default class NetArenaScene extends Phaser.Scene {
   // time its list shows up in room.state, then never touched again.
   _syncHazardsFromRoom() {
     const st = this.room.state;
+    // Right after join, over a real (non-localhost) connection, a frame or
+    // two can tick before the initial full-state patch finishes decoding —
+    // these ArraySchema fields exist from the very first synced state, but
+    // guard the gap anyway rather than crashing the whole update() loop
+    // (which would otherwise also block per-frame fighter sync/HUD/input).
+    if (!st.obstacles || !st.pits || !st.quicksand) return;
 
     if (!this.obstaclesBuilt && st.obstacles.length > 0) {
       this._buildObstacleArt(st.obstacles);
