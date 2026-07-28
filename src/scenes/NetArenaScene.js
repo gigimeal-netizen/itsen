@@ -716,16 +716,18 @@ export default class NetArenaScene extends Phaser.Scene {
     this.mySessionId = room.sessionId;
     this._reconnectionToken = room.reconnectionToken;
     this.connectionError = null;
-    // Spectators never get a PlayerState entry (see ArenaRoom.onJoin) — this
-    // is true for both a fresh spectate join and a reconnect into the same
-    // spectator slot.
-    this.isSpectator = !room.state.players.has(this.mySessionId);
-    document.body.classList.toggle("spectating", this.isSpectator);
-    if (this.isSpectator) {
-      this.cameras.main.stopFollow();
-      this.cameras.main.setZoom(0.55);
-      this.cameras.main.centerOn(ARENA.WIDTH / 2, ARENA.HEIGHT / 2);
-    }
+    // room.state's nested schema fields (players, obstacles, ...) aren't
+    // necessarily hydrated the instant joinOrCreate()/reconnect() resolves
+    // over a real (non-localhost) connection — the initial full-state patch
+    // is a separate, slightly-later message. Reading room.state.players
+    // synchronously here crashed on exactly that gap. Default to the
+    // spectator look (safe, self-corrects the moment our own PlayerState
+    // actually shows up below) instead of inspecting state before it exists.
+    this.isSpectator = true;
+    document.body.classList.add("spectating");
+    this.cameras.main.stopFollow();
+    this.cameras.main.setZoom(0.55);
+    this.cameras.main.centerOn(ARENA.WIDTH / 2, ARENA.HEIGHT / 2);
 
     for (const fighter of this.fighters.values()) fighter.destroy();
     this.fighters.clear();
@@ -746,8 +748,14 @@ export default class NetArenaScene extends Phaser.Scene {
       $(player).onChange(() => this._latestSnapshots.set(sessionId, { ...player }));
 
       if (sessionId === this.mySessionId) {
+        // A real PlayerState for our own sessionId means we're an actual
+        // player, not a spectator — corrects the safe default set in
+        // _wireRoom() the moment the state confirms it either way.
+        this.isSpectator = false;
+        document.body.classList.remove("spectating");
         // The arena is much bigger than one screen — follow the local
         // player instead of showing the whole map at once.
+        this.cameras.main.setZoom(1);
         this.cameras.main.startFollow(fighter.container, true, 0.12, 0.12);
       }
     });
@@ -892,6 +900,8 @@ export default class NetArenaScene extends Phaser.Scene {
       return;
     }
 
+    if (!this.room.state.players) return; // initial state patch hasn't arrived yet
+
     if (this.isSpectator) {
       const playerCount = this.room.state.players.size;
       this.hud.textContent =
@@ -924,7 +934,7 @@ export default class NetArenaScene extends Phaser.Scene {
   // else — used for the deathmatch "+1" flash and the scoreboard list.
   _playerLabel(sessionId) {
     if (sessionId === this.mySessionId) return "YOU";
-    const p = this.room && this.room.state.players.get(sessionId);
+    const p = this.room && this.room.state.players && this.room.state.players.get(sessionId);
     return p ? `P${p.colorIndex + 1}` : "?";
   }
 
@@ -936,6 +946,7 @@ export default class NetArenaScene extends Phaser.Scene {
   _updateMatchUI() {
     if (!this.room) return;
     const st = this.room.state;
+    if (!st.players) return; // initial state patch hasn't arrived yet
 
     this.modeRoundBtn.classList.toggle("active", st.mode === "round");
     this.modeDeathmatchBtn.classList.toggle("active", st.mode === "deathmatch");
