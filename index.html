@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>itsen.io</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; background: #0d0b08; overflow: hidden;
+    width: 100%; height: 100%;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #game-root { position: absolute; inset: 0; }
+
+  #hud {
+    position: absolute; top: 10px; left: 10px; z-index: 2; color: #dfd0b0;
+    font: 12px/1.6 "Consolas", monospace; pointer-events: none; white-space: pre;
+    background: rgba(18, 14, 8, 0.6);
+    border: 1px solid rgba(201, 138, 58, 0.35);
+    border-radius: 8px;
+    padding: 8px 12px;
+    backdrop-filter: blur(3px);
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.35);
+  }
+
+  #vignette {
+    position: absolute; inset: 0; z-index: 1; pointer-events: none;
+    background:
+      radial-gradient(ellipse at center, rgba(0, 0, 0, 0) 48%, rgba(8, 6, 3, 0.75) 100%),
+      radial-gradient(ellipse at top, rgba(120, 90, 50, 0.06) 0%, rgba(0, 0, 0, 0) 50%);
+  }
+
+  #scoreboard {
+    position: absolute; top: 10px; left: 50%; z-index: 2;
+    transform: translateX(-50%);
+    display: flex; align-items: center; gap: 14px;
+    background: rgba(18, 14, 8, 0.6);
+    border: 1px solid rgba(201, 138, 58, 0.35);
+    border-radius: 8px;
+    padding: 6px 14px;
+    font: 700 16px/1.4 "Consolas", monospace;
+    color: #dfd0b0;
+    backdrop-filter: blur(3px);
+  }
+  #scoreboard .label { opacity: 0.7; font-weight: 400; font-size: 13px; }
+  #scoreboard .score { color: #ffcc66; font-size: 20px; }
+  #modeSwitch { display: flex; gap: 4px; margin-right: 4px; }
+  .mode-btn {
+    font: 700 10px/1 "Consolas", monospace;
+    padding: 5px 8px;
+    border-radius: 5px;
+    border: 1px solid rgba(201, 138, 58, 0.35);
+    background: rgba(0, 0, 0, 0.3);
+    color: #dfd0b0;
+    cursor: pointer;
+  }
+  .mode-btn.active { background: #c98a3a; color: #1a1206; border-color: #c98a3a; }
+
+  #roundBanner {
+    position: absolute; top: 38%; left: 50%; z-index: 5;
+    transform: translate(-50%, -50%) scale(0.85);
+    font: 700 44px/1 "Consolas", monospace;
+    color: #ffcc66;
+    text-shadow: 0 0 18px rgba(255, 160, 40, 0.6), 0 2px 4px rgba(0, 0, 0, 0.8);
+    letter-spacing: 2px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.25s ease, transform 0.25s ease;
+  }
+  #roundBanner.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+
+  #skillbar {
+    position: absolute; left: 50%; bottom: 22px; z-index: 2;
+    transform: translateX(-50%);
+    display: flex; gap: 10px; pointer-events: none;
+  }
+  .skill-slot {
+    position: relative; width: 56px; height: 56px;
+    background: rgba(18, 14, 8, 0.75);
+    border: 2px solid rgba(201, 138, 58, 0.3);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+    transition: box-shadow 0.15s linear, border-color 0.15s linear;
+  }
+  .skill-slot.active {
+    border-color: currentColor;
+    box-shadow: 0 0 16px 2px currentColor;
+  }
+  .skill-fill {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 0%;
+    background: #3ddc84;
+    transition: height 0.08s linear, background-color 0.15s linear;
+  }
+  .skill-label {
+    position: relative; z-index: 1;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%;
+    font: 700 20px/1 "Consolas", monospace;
+    color: #fff;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  }
+
+  /* Mobile touch controls — only shown on touch-primary devices, so they
+     never sit on top of the canvas and steal mouse clicks on desktop. */
+  .mobile-only { display: none; }
+  @media (hover: none) and (pointer: coarse) {
+    .mobile-only { display: block; }
+  }
+
+  #joystickZone {
+    position: absolute; left: 0; bottom: 0; z-index: 3;
+    width: 45%; height: 55%;
+    touch-action: none;
+  }
+  #joystickBase, #joystickThumb {
+    display: none; position: absolute; z-index: 4;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+  #joystickBase {
+    width: 96px; height: 96px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 2px solid rgba(255, 255, 255, 0.3);
+  }
+  #joystickThumb {
+    width: 44px; height: 44px;
+    background: rgba(255, 255, 255, 0.35);
+    border: 2px solid rgba(255, 255, 255, 0.6);
+  }
+
+  #actionButtons {
+    position: absolute; right: 18px; bottom: 26px; z-index: 3;
+    width: 190px; height: 150px;
+  }
+  .action-btn {
+    position: absolute;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+    font: 700 22px/1 "Consolas", monospace;
+    color: #fff;
+    background: rgba(10, 14, 26, 0.65);
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    touch-action: none;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  }
+  .action-btn.pressed { background: rgba(255, 255, 255, 0.3); }
+  #btnQ { width: 84px; height: 84px; left: 0; bottom: 0; border-color: #ff9f43; color: #ff9f43; }
+  #btnW { width: 64px; height: 64px; right: 0; bottom: 76px; border-color: #7ff0ff; color: #7ff0ff; }
+  #btnE { width: 64px; height: 64px; right: 0; bottom: 0; border-color: #ffcc33; color: #ffcc33; }
+
+  #rotateHint {
+    display: none; position: absolute; inset: 0; z-index: 10;
+    background: rgba(5, 7, 13, 0.92);
+    color: #dfe6f5; font: 14px/1.6 "Consolas", monospace;
+    align-items: center; justify-content: center; text-align: center;
+    padding: 20px;
+  }
+  @media (hover: none) and (pointer: coarse) and (orientation: portrait) {
+    #rotateHint { display: flex; }
+  }
+
+  #titleScreen {
+    position: absolute; inset: 0; z-index: 20;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 22px;
+    background:
+      radial-gradient(ellipse at center, rgba(20, 15, 8, 0.55) 0%, rgba(6, 4, 2, 0.92) 75%),
+      #0d0b08;
+    color: #dfd0b0;
+    font-family: "Consolas", monospace;
+    text-align: center;
+    padding: 20px;
+    overflow: hidden;
+  }
+  #titleScreen h1 {
+    margin: 0;
+    font-size: clamp(30px, 6vw, 52px);
+    letter-spacing: 4px;
+    color: #ffcc66;
+    opacity: 0;
+    animation: fadeInUp 0.7s ease 0.1s forwards, titleGlow 2.6s ease-in-out 0.8s infinite;
+  }
+  #titleScreen .subtitle {
+    font-size: 13px;
+    opacity: 0;
+    letter-spacing: 1px;
+    animation: fadeInUp 0.7s ease 0.28s forwards;
+  }
+  #titleScreen .controls {
+    font-size: 13px;
+    line-height: 1.9;
+    background: rgba(18, 14, 8, 0.5);
+    border: 1px solid rgba(201, 138, 58, 0.3);
+    border-radius: 8px;
+    padding: 14px 22px;
+    opacity: 0;
+    animation: fadeInUp 0.7s ease 0.44s forwards;
+  }
+  #titleScreen .controls b { color: #ffcc66; }
+  #startBtn {
+    font: 700 18px/1 "Consolas", monospace;
+    letter-spacing: 2px;
+    padding: 14px 40px;
+    border-radius: 8px;
+    border: 2px solid #c98a3a;
+    background: #c98a3a;
+    color: #1a1206;
+    cursor: pointer;
+    opacity: 0;
+    animation: fadeInUp 0.7s ease 0.6s forwards, btnPulse 2s ease-in-out 1.3s infinite;
+    transition: transform 0.1s ease;
+  }
+  #startBtn:hover { transform: scale(1.04); }
+  #startBtn:active { transform: translateY(1px) scale(0.98); }
+  #titleScreen.hidden { display: none; }
+
+  @keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes titleGlow {
+    0%, 100% { text-shadow: 0 0 20px rgba(255, 160, 40, 0.45), 0 2px 4px rgba(0, 0, 0, 0.8); }
+    50% { text-shadow: 0 0 34px rgba(255, 185, 70, 0.8), 0 2px 4px rgba(0, 0, 0, 0.8); }
+  }
+  @keyframes btnPulse {
+    0%, 100% { box-shadow: 0 0 18px rgba(201, 138, 58, 0.3); }
+    50% { box-shadow: 0 0 30px rgba(201, 138, 58, 0.6); }
+  }
+
+  .ember {
+    position: absolute; bottom: -12px; z-index: 0;
+    width: 3px; height: 3px; border-radius: 50%;
+    background: radial-gradient(circle, #ffcc66 0%, rgba(255, 160, 40, 0) 75%);
+    opacity: 0;
+    animation: emberRise linear infinite;
+  }
+  @keyframes emberRise {
+    0% { transform: translate(0, 0); opacity: 0; }
+    12% { opacity: 0.85; }
+    85% { opacity: 0.25; }
+    100% { transform: translate(var(--drift, 20px), -640px); opacity: 0; }
+  }
+</style>
+</head>
+<body>
+<div id="game-root"></div>
+<div id="titleScreen">
+  <div class="ember" style="left:6%; animation-duration:7s; animation-delay:0s; --drift:14px;"></div>
+  <div class="ember" style="left:14%; animation-duration:9s; animation-delay:1.4s; --drift:-18px;"></div>
+  <div class="ember" style="left:23%; animation-duration:6.5s; animation-delay:3s; --drift:22px;"></div>
+  <div class="ember" style="left:33%; animation-duration:8s; animation-delay:0.6s; --drift:-10px;"></div>
+  <div class="ember" style="left:44%; animation-duration:7.5s; animation-delay:2.2s; --drift:16px;"></div>
+  <div class="ember" style="left:56%; animation-duration:9.5s; animation-delay:4s; --drift:-24px;"></div>
+  <div class="ember" style="left:64%; animation-duration:6.8s; animation-delay:1s; --drift:12px;"></div>
+  <div class="ember" style="left:73%; animation-duration:8.4s; animation-delay:2.8s; --drift:-14px;"></div>
+  <div class="ember" style="left:82%; animation-duration:7.2s; animation-delay:0.3s; --drift:20px;"></div>
+  <div class="ember" style="left:91%; animation-duration:9s; animation-delay:3.6s; --drift:-16px;"></div>
+  <div class="ember" style="left:38%; animation-duration:10s; animation-delay:5s; --drift:8px;"></div>
+  <div class="ember" style="left:69%; animation-duration:6.2s; animation-delay:4.6s; --drift:-8px;"></div>
+
+  <h1>ITSEN.IO</h1>
+  <div class="subtitle">폐허의 결투 — SINGLE PLAYER</div>
+  <div class="controls">
+    마우스 좌클릭 홀드: <b>이동</b> (커서 방향)<br/>
+    <b>Q</b> 발도술(홀드 차지 → 릴리즈 대시, 즉사)&nbsp;&nbsp;
+    <b>W</b> 반격자세(0.5초 무적)&nbsp;&nbsp;
+    <b>E</b> 발차기(기절+넉백)<br/>
+    Q는 W에게 막히고, W는 E에게 뚫리고, E는 Q에게 진다
+  </div>
+  <button id="startBtn">시작하기</button>
+</div>
+<div id="hud"></div>
+<div id="vignette"></div>
+<div id="scoreboard">
+  <div id="modeSwitch">
+    <button class="mode-btn" id="modeRoundBtn">ROUND</button>
+    <button class="mode-btn" id="modeDeathmatchBtn">DEATHMATCH</button>
+  </div>
+  <span class="label">YOU</span><span class="score" id="scoreYou">0</span>
+  <span class="label">:</span>
+  <span class="score" id="scoreDummy">0</span><span class="label">DUMMY</span>
+</div>
+<div id="roundBanner"></div>
+<div id="skillbar">
+  <div class="skill-slot" id="slotQ"><div class="skill-fill" id="fillQ"></div><span class="skill-label">Q</span></div>
+  <div class="skill-slot" id="slotW"><div class="skill-fill" id="fillW"></div><span class="skill-label">W</span></div>
+  <div class="skill-slot" id="slotE"><div class="skill-fill" id="fillE"></div><span class="skill-label">E</span></div>
+</div>
+
+<div id="joystickZone" class="mobile-only"></div>
+<div id="joystickBase"></div>
+<div id="joystickThumb"></div>
+<div id="actionButtons" class="mobile-only">
+  <div class="action-btn" id="btnQ">Q</div>
+  <div class="action-btn" id="btnW">W</div>
+  <div class="action-btn" id="btnE">E</div>
+</div>
+<div id="rotateHint">화면을 가로로 돌려주세요<br/>Please rotate to landscape</div>
+
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.70.0/dist/phaser.min.js"></script>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

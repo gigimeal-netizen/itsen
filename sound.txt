@@ -1,0 +1,62 @@
+1. Q 차징 시작 (검을 뽑아 기를 모으는 상태)
+어울리는 소리: 서서히 피치(Pitch)가 올라가는 묵직하고 날카로운 금속 마찰음 또는 기 모으는 소리.
+
+검색 키워드: katana draw rise, sword unsheath rising, charge up metallic, sheath friction.
+
+연출 팁: Q를 누르고 있는 동안 Loop 재생하며, 시간이 지날수록 피치를 높여 "돌진 임계점"에 다다랐음을 전달합니다.
+
+2. Q 대시 발동 (광속 돌진 + 강력한 베기)
+어울리는 소리: 바람을 가르는 둔탁한 공기 파열음(Whoosh)과 동시에 쨍하게 지나가는 칼날 소리.
+
+검색 키워드: sword slash whoosh, blade slice dash, heavy sword swing, fast wind slice.
+
+연출 팁: 이동 시작 순간에는 강한 '쉭!(Whoosh)', 돌진 중에는 날카로운 '챙-(Metal Slice)' 소리가 연이어 나오도록 레이어링합니다.
+
+3. 벽 충돌 (대시 도중 벽에 막힘)
+어울리는 소리: 낮은 툭 소리 / 둔탁하게 쿵 부딪히는 소리.
+
+검색 키워드: wood thud, heavy wall impact low, blunt object hit, stone thud.
+
+연출 팁: 고음이 차단된(Low-pass filter 적용된) '툭' 소리를 사용해 "공격이 차단되어 맥이 끊겼음"을 귀로 즉시 느끼게 해줍니다.
+
+4. W 반격 자세 (0.5초 방어 진입)
+어울리는 소리: 공기가 일시적으로 멈추는 듯한 웅장한 에너지 보호막 형성음 / 신비로운 칼날 튕김 준비음.
+
+검색 키워드: magic shield active, parry stance, stasis hum, time freeze chime.
+
+연출 팁: 짧은 0.5초 동안만 들려야 하므로 샤아앙- 하는 아주 빠른 에너지 감싸는 소리를 씁니다.
+
+5. W 반격 성공 (공격 받아치기)
+어울리는 소리: 밝은 차임 + 스파클 노이즈 (요청하신 사운드 지정).
+
+검색 키워드: bright chime sparkle, magic counter ping, crystal chime impact, holy glass break.
+
+연출 팁: 쨍한 명금음(Ping) 뒤에 잔향이 남는 '샤르르~' 한 스파클 소리가 이어지면 플레이어에게 엄청난 쾌감을 줍니다.
+
+6. E 발차기 스윙 (정면 30도 휘두르기)
+어울리는 소리: 묵직하고 빠르게 공기를 가르는 옷자락/천 소리 + 체중이 실린 바람 소리.
+
+검색 키워드: heavy kick swing, martial arts whoosh, cloth swoosh, heavy punch air.
+
+연출 팁: 칼 소리(Q)와 완전히 대비되도록 날카로운 금속음을 빼고 '휘익!' 하는 둔탁한 바람 소리만 남깁니다.
+
+7. E 발차기 명중 (적 피격 + 넉백)
+어울리는 소리: 뼈가 울리는 듯한 묵직한 가죽/육체 타격음 + 밀려나는 바람 소리.
+
+검색 키워드: body impact kick, heavy blunt hit, flesh thud, knockback impact.
+
+연출 팁: '팍-!' 하는 타격음 직후 아주 짧은 저음 넉백 사운드를 섞어 밀려나는 느낌을 극대화합니다.
+
+8. 기절 발생 (Stun 2초 적용)
+어울리는 소리: 머리 위에서 별이 도는 듯한 띵~하는 사운드 / 몽롱한 벨 소리.
+
+검색 키워드: stun chime, dizzy bell, dazed sound effect, retro dizzy star.
+
+연출 팁: '띵~ 띠링~' 하는 아케이드 스타일의 감쇠(Decay)음이 2초간 지속되도록 설정하면 행동불능 상태임을 한눈에 알 수 있습니다.
+
+9. 처치 (Q 맞고 1타 즉사)
+어울리는 소리: 잔인하고 서늘하게 베이는 소리 + 묵직한 일격필살 파열음.
+
+검색 키워드: sword kill impact, heavy slash slice, critical strike hit, gory blade impact.
+
+연출 팁: 일반 베기보다 저음(Sub-bass)이 크게 강조된 팍! 소리와 함께 화면에 피색/카메라 흔들림 이펙트를 주면 극적인 사냥감을 완성할 수 있습니다.
