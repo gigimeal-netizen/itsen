@@ -8,7 +8,10 @@ new Phaser.Game({
   parent: "game-root",
   backgroundColor: "#000000",
   scale: {
-    mode: Phaser.Scale.FIT,
+    // ENVELOP crops to fill the screen edge-to-edge instead of FIT's
+    // letterbox bars — VIEWPORT's 3:2 aspect never matches a phone's
+    // screen exactly, so FIT left visible black bars on the sides.
+    mode: Phaser.Scale.ENVELOP,
     autoCenter: Phaser.Scale.CENTER_BOTH,
   },
   input: {

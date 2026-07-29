@@ -25,6 +25,11 @@
     backdrop-filter: blur(3px);
     box-shadow: 0 0 10px rgba(0, 0, 0, 0.35);
   }
+  /* Dev-debug overlay — collides visually with the scoreboard on a small
+     touch screen, so it's desktop-only. */
+  @media (hover: none) and (pointer: coarse) {
+    #hud { display: none; }
+  }
 
   #vignette {
     position: absolute; inset: 0; z-index: 1; pointer-events: none;
@@ -139,19 +144,22 @@
   }
   .action-btn {
     position: absolute;
-    display: flex; align-items: center; justify-content: center;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 1px;
     border-radius: 50%;
-    font: 700 22px/1 "Consolas", monospace;
     color: #fff;
     background: rgba(10, 14, 26, 0.65);
     border: 2px solid rgba(255, 255, 255, 0.25);
     touch-action: none;
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
   }
+  .action-btn .icon { font-size: 28px; line-height: 1; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8)); }
+  .action-btn .key { font: 700 11px/1 "Consolas", monospace; opacity: 0.85; }
   .action-btn.pressed { background: rgba(255, 255, 255, 0.3); }
   #btnQ { width: 84px; height: 84px; left: 0; bottom: 0; border-color: #ff9f43; color: #ff9f43; }
   #btnW { width: 64px; height: 64px; right: 0; bottom: 76px; border-color: #7ff0ff; color: #7ff0ff; }
   #btnE { width: 64px; height: 64px; right: 0; bottom: 0; border-color: #ffcc33; color: #ffcc33; }
+  #btnW .icon, #btnE .icon { font-size: 22px; }
 
   #rotateHint {
     display: none; position: absolute; inset: 0; z-index: 10;
@@ -175,7 +183,17 @@
     font-family: "Consolas", monospace;
     text-align: center;
     padding: 20px;
-    overflow: hidden;
+    /* The body blocks all touch gestures for gameplay (touch-action: none),
+       but on a short/narrow screen this content can be taller than the
+       viewport — without its own scroll, "시작하기" ends up unreachable. */
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+  }
+  @media (max-height: 640px) {
+    #titleScreen { gap: 12px; padding: 14px; }
+    #titleScreen h1 { font-size: clamp(22px, 8vw, 36px); }
+    #titleScreen .controls { font-size: 11px; line-height: 1.6; padding: 10px 16px; }
   }
   #titleScreen h1 {
     margin: 0;
@@ -296,9 +314,9 @@
 <div id="joystickBase"></div>
 <div id="joystickThumb"></div>
 <div id="actionButtons" class="mobile-only">
-  <div class="action-btn" id="btnQ">Q</div>
-  <div class="action-btn" id="btnW">W</div>
-  <div class="action-btn" id="btnE">E</div>
+  <div class="action-btn" id="btnQ"><span class="icon">🗡️</span><span class="key">Q</span></div>
+  <div class="action-btn" id="btnW"><span class="icon">🛡️</span><span class="key">W</span></div>
+  <div class="action-btn" id="btnE"><span class="icon">🦵</span><span class="key">E</span></div>
 </div>
 <div id="rotateHint">화면을 가로로 돌려주세요<br/>Please rotate to landscape</div>
 
