@@ -257,8 +257,8 @@ export default class ArenaScene extends Phaser.Scene {
   }
 
   _makePitDecor(p) {
-    const cx = p.x + p.w / 2;
-    const cy = p.y + p.h / 2;
+    const cx = p.x;
+    const cy = p.y;
     const rx = (p.w / 2) * 1.1;
     const ry = (p.h / 2) * 1.1;
     const harmonics = [
@@ -340,8 +340,8 @@ export default class ArenaScene extends Phaser.Scene {
   _drawQuicksand() {
     this.quicksandGfx.clear();
     for (const q of this.quicksandPatches) {
-      const cx = q.x + q.w / 2;
-      const cy = q.y + q.h / 2;
+      const cx = q.x;
+      const cy = q.y;
       const rx = q.w / 2;
       const ry = q.h / 2;
 
@@ -367,8 +367,8 @@ export default class ArenaScene extends Phaser.Scene {
   // Spawns a permanent set of looping bubble particles for one quicksand
   // patch (called once, at patch creation).
   _spawnQuicksandBubbles(patch) {
-    const cx = patch.x + patch.w / 2;
-    const cy = patch.y + patch.h / 2;
+    const cx = patch.x;
+    const cy = patch.y;
     for (let i = 0; i < 4; i++) {
       const theta = Math.random() * Math.PI * 2;
       const rr = Math.random() * 0.55;
@@ -388,8 +388,14 @@ export default class ArenaScene extends Phaser.Scene {
     }
   }
 
+  // layoutGenerator.js's {x, y, w, h} rects are CENTER-based (x,y is the
+  // rect's center) — this used to check it as a top-left corner, silently
+  // shifting the real pit/quicksand hit region by (w/2, h/2) away from
+  // wherever it was actually drawn/verified-clear-of-spawns.
   _inZone(c, zone) {
-    return c.x >= zone.x && c.x <= zone.x + zone.w && c.y >= zone.y && c.y <= zone.y + zone.h;
+    const halfW = zone.w / 2;
+    const halfH = zone.h / 2;
+    return c.x >= zone.x - halfW && c.x <= zone.x + halfW && c.y >= zone.y - halfH && c.y <= zone.y + halfH;
   }
 
   // Pits are permanent and always lethal (a Q dash still passes safely

@@ -256,8 +256,8 @@ export default class NetArenaScene extends Phaser.Scene {
   }
 
   _spawnQuicksandBubbles(patch) {
-    const cx = patch.x + patch.w / 2;
-    const cy = patch.y + patch.h / 2;
+    const cx = patch.x;
+    const cy = patch.y;
     for (let i = 0; i < 4; i++) {
       const theta = Math.random() * Math.PI * 2;
       const rr = Math.random() * 0.55;
@@ -280,8 +280,8 @@ export default class NetArenaScene extends Phaser.Scene {
   _drawQuicksand() {
     this.quicksandGfx.clear();
     for (const q of this.quicksandPatches) {
-      const cx = q.x + q.w / 2;
-      const cy = q.y + q.h / 2;
+      const cx = q.x;
+      const cy = q.y;
       const rx = q.w / 2;
       const ry = q.h / 2;
 
@@ -317,8 +317,8 @@ export default class NetArenaScene extends Phaser.Scene {
   }
 
   _makePitDecor(p) {
-    const cx = p.x + p.w / 2;
-    const cy = p.y + p.h / 2;
+    const cx = p.x;
+    const cy = p.y;
     const rx = (p.w / 2) * 1.1;
     const ry = (p.h / 2) * 1.1;
     const harmonics = [

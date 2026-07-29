@@ -382,9 +382,16 @@ class ArenaRoom extends Room {
     return pointInPolygon(FLOOR_POLYGON, x, y);
   }
 
+  // layoutGenerator.js's {x, y, w, h} rects are CENTER-based (x,y is the
+  // rect's center, matching circleHitsRect's convention below) — pits and
+  // quicksand used to check this as a top-left corner instead, silently
+  // shifting the real hit region by (w/2, h/2) away from wherever it was
+  // actually drawn/verified-clear-of-spawns.
   isInQuicksand(x, y) {
     for (const q of this.state.quicksand) {
-      if (x >= q.x && x <= q.x + q.w && y >= q.y && y <= q.y + q.h) return true;
+      const halfW = q.w / 2;
+      const halfH = q.h / 2;
+      if (x >= q.x - halfW && x <= q.x + halfW && y >= q.y - halfH && y <= q.y + halfH) return true;
     }
     return false;
   }
@@ -404,7 +411,9 @@ class ArenaRoom extends Room {
     for (const [sessionId, player] of this.state.players.entries()) {
       if (!player.isAlive || player.state === C.STATES.DASH) continue;
       for (const p of this.state.pits) {
-        if (player.x >= p.x && player.x <= p.x + p.w && player.y >= p.y && player.y <= p.y + p.h) {
+        const halfW = p.w / 2;
+        const halfH = p.h / 2;
+        if (player.x >= p.x - halfW && player.x <= p.x + halfW && player.y >= p.y - halfH && player.y <= p.y + halfH) {
           this.kill(player, this.scratch.get(sessionId));
           break;
         }
