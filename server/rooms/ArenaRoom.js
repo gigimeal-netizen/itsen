@@ -151,23 +151,6 @@ class ArenaRoom extends Room {
       if (msg.ePressed) s.ePressed = true;
     });
 
-    // Both clients share one mode — either player can switch it, which
-    // resets both scores and restarts the countdown, same as the
-    // single-player ArenaScene._setMode(). Spectators have no seat and no
-    // say in it.
-    this.onMessage("setMode", (client, msg) => {
-      if (!this.state.players.has(client.sessionId)) return;
-      if (msg.mode !== "round" && msg.mode !== "deathmatch") return;
-      if (this.state.mode === msg.mode) return;
-      this.state.mode = msg.mode;
-      for (const [sessionId, player] of this.state.players.entries()) {
-        player.score = 0;
-        this.respawn(player, this.scratch.get(sessionId));
-      }
-      this.startCountdown();
-      this._updateMetadata();
-    });
-
     this.setSimulationInterval((dtMs) => this.tick(dtMs), C.SIMULATION_INTERVAL_MS);
     // Colyseus defaults to broadcasting schema patches at 20Hz (50ms), well
     // below the 60Hz simulation tick above — the client only has a fresh

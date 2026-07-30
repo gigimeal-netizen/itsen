@@ -56,17 +56,6 @@
   #scoreList .entry { display: flex; align-items: center; gap: 5px; }
   #scoreList .entry.me .label { opacity: 1; color: #ffcc66; }
   #scoreList .sep { opacity: 0.4; }
-  #modeSwitch { display: flex; gap: 4px; margin-right: 4px; }
-  .mode-btn {
-    font: 700 10px/1 "Consolas", monospace;
-    padding: 5px 8px;
-    border-radius: 5px;
-    border: 1px solid rgba(201, 138, 58, 0.35);
-    background: rgba(0, 0, 0, 0.3);
-    color: #dfd0b0;
-    cursor: pointer;
-  }
-  .mode-btn.active { background: #c98a3a; color: #1a1206; border-color: #c98a3a; }
 
   #roundBanner {
     position: absolute; top: 38%; left: 50%; z-index: 5;
@@ -330,10 +319,8 @@
   }
   #leaveBtn:hover { background: rgba(255, 100, 100, 0.2); }
 
-  /* While spectating: no move/skill input, so hide the mobile controls and
-     dim the mode switch (server also rejects a spectator's setMode). */
+  /* While spectating: no move/skill input, so hide the mobile controls. */
   body.spectating #joystickZone, body.spectating #actionButtons { display: none !important; }
-  body.spectating #modeSwitch { opacity: 0.35; pointer-events: none; }
 
   @keyframes fadeInUp {
     from { opacity: 0; transform: translateY(16px); }
@@ -480,10 +467,6 @@
 <div id="hud">연결 중...</div>
 <div id="vignette"></div>
 <div id="scoreboard">
-  <div id="modeSwitch">
-    <button class="mode-btn" id="modeRoundBtn">ROUND</button>
-    <button class="mode-btn" id="modeDeathmatchBtn">DEATHMATCH</button>
-  </div>
   <div id="scoreList"></div>
 </div>
 <button id="leaveBtn">나가기</button>

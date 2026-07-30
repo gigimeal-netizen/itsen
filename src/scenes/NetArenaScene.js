@@ -99,15 +99,14 @@ export default class NetArenaScene extends Phaser.Scene {
     this._kickHitFlags = new Map(); // sessionId -> already played kickHit() for this kick
     this.hitstopMs = 0;
 
-    // Match-flow UI (ROUND/DEATHMATCH mode, 3-2-1-FIGHT! countdown, round
-    // banner, scoreboard) — server-authoritative (room.state.mode/matchPhase/
-    // phaseTimer/winnerId), this scene just renders it. See _updateMatchUI().
+    // Match-flow UI (3-2-1-FIGHT! countdown, round banner, scoreboard) —
+    // server-authoritative (room.state.mode/matchPhase/phaseTimer/winnerId),
+    // this scene just renders it. Mode is fixed per room (no in-match
+    // switch — it used to reset everyone's score/countdown on every click,
+    // which read as an accidental full reset far more often than an
+    // intentional mode change). See _updateMatchUI().
     this.roundBannerEl = document.getElementById("roundBanner");
     this.scoreListEl = document.getElementById("scoreList");
-    this.modeRoundBtn = document.getElementById("modeRoundBtn");
-    this.modeDeathmatchBtn = document.getElementById("modeDeathmatchBtn");
-    this.modeRoundBtn.onclick = () => this._sendSetMode("round");
-    this.modeDeathmatchBtn.onclick = () => this._sendSetMode("deathmatch");
     this._killFlashUntil = 0;
     this._killFlashText = "";
 
@@ -1182,10 +1181,6 @@ export default class NetArenaScene extends Phaser.Scene {
       `상대: ${oppText}`;
   }
 
-  _sendSetMode(mode) {
-    if (this.room) this.room.send("setMode", { mode });
-  }
-
   // "YOU" for the local player, "P1".."P4" (by seat/colorIndex) for anyone
   // else — used for the deathmatch "+1" flash and the scoreboard list.
   _playerLabel(sessionId) {
@@ -1195,17 +1190,14 @@ export default class NetArenaScene extends Phaser.Scene {
   }
 
   // Renders the shared, server-authoritative match state (room.state.mode/
-  // matchPhase/phaseTimer/winnerId) — mode buttons, scoreboard, and the
-  // 3-2-1-FIGHT!/WIN-LOSE-DRAW banner. Mirrors the single-player
-  // ArenaScene's _updateModeButtons/_checkRoundEnd/_flashKillText, just
-  // driven by room state instead of local combatant bookkeeping.
+  // matchPhase/phaseTimer/winnerId) — scoreboard and the 3-2-1-FIGHT!/
+  // WIN-LOSE-DRAW banner. Mirrors the single-player ArenaScene's
+  // _checkRoundEnd/_flashKillText, just driven by room state instead of
+  // local combatant bookkeeping.
   _updateMatchUI() {
     if (!this.room) return;
     const st = this.room.state;
     if (!st.players) return; // initial state patch hasn't arrived yet
-
-    this.modeRoundBtn.classList.toggle("active", st.mode === "round");
-    this.modeDeathmatchBtn.classList.toggle("active", st.mode === "deathmatch");
 
     // Local player's own entry first, then the rest sorted by seat index —
     // stable ordering so the list doesn't reshuffle every frame.
