@@ -19,18 +19,18 @@ export default class ArenaScene extends Phaser.Scene {
   }
 
   preload() {
-    this.load.audio("qCharging", "q_charging.wav");
-    this.load.audio("qActive", "q_active.mp3");
-    this.load.audio("kick", "kicksound.mp3");
-    this.load.audio("kill", "kill.mp3");
-    this.load.audio("shieldOn", "shield_on.mp3");
-    this.load.audio("parry", "parry.mp3");
-    this.load.audio("wSuccess", "Wsucces.mp3");
-    this.load.audio("terrainAppear", "sand_appear_sound.mp3");
+    this.load.audio("qCharging", "assets/audio/q_charging.wav");
+    this.load.audio("qActive", "assets/audio/q_active.mp3");
+    this.load.audio("kick", "assets/audio/kicksound.mp3");
+    this.load.audio("kill", "assets/audio/kill.mp3");
+    this.load.audio("shieldOn", "assets/audio/shield_on.mp3");
+    this.load.audio("parry", "assets/audio/parry.mp3");
+    this.load.audio("wSuccess", "assets/audio/Wsucces.mp3");
+    this.load.audio("terrainAppear", "assets/audio/sand_appear_sound.mp3");
 
-    this.load.image("arenaVoid", "arena_void.png");
-    this.load.image("arenaTile", "arena_tile.png");
-    this.load.image("arenaObs", "arena_obs.png");
+    this.load.image("arenaVoid", "assets/images/arena_void.png");
+    this.load.image("arenaTile", "assets/images/arena_tile.png");
+    this.load.image("arenaObs", "assets/images/arena_obs.png");
   }
 
   create() {
