@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Folder guides
+
+Each major folder has its own `CLAUDE.md` with directory-scoped architecture/conventions — read this
+root file first, then the relevant one(s) below for anything that goes deeper than a one-line change:
+
+- [`src/CLAUDE.md`](src/CLAUDE.md) — client code map (FSM update order, GCD-skip pattern, entities/scenes/config/audio/input layout).
+- [`server/CLAUDE.md`](server/CLAUDE.md) — Colyseus server map, the colyseus.js version pin, running/deploying it.
+- [`assets/CLAUDE.md`](assets/CLAUDE.md) — audio/image assets and how to register a new one in `preload()`.
+- [`vendor/CLAUDE.md`](vendor/CLAUDE.md) — the vendored `colyseus.js` bundle and how to update it.
+
 ## Project status
 
 Phase 1 (single-player) and a Phase 2 multiplayer MVP are implemented. No bundler/package manager is used on the client — Phaser 3 is loaded via CDN and the client is plain ES modules served as static files. There is no lint/test setup yet.
@@ -24,7 +34,7 @@ Phase 1 (single-player) and a Phase 2 multiplayer MVP are implemented. No bundle
 Nothing is deployed yet — this just documents what's in place so an actual deploy is a config/hosting choice, not a code change.
 
 - **Server** (`server/`) reads its port from `process.env.PORT` (falls back to 2567 — see `server/index.js`), so it runs as-is on any Node PaaS. `server/Dockerfile` builds a plain `node index.js` container (pin the base image's Node version to whatever `colyseus@0.16` supports — see the version-pin note above before bumping it). `server/.env.example` documents the one env var that matters.
-- **Client** (`index.html`, `net.html`, `src/`, `vendor/`, assets) is static — any static host works, `nocache_server.py` is purely a local-dev convenience, not something a real deploy needs.
+- **Client** (`index.html`, `net.html`, `src/`, `vendor/`, `assets/`) is static — any static host works, `nocache_server.py` is purely a local-dev convenience, not something a real deploy needs.
 - Since the client and server will usually end up on different hosts/ports in a real deploy, `net.html` sets `window.ARENA_SERVER_URL` (null by default = same-host `:2567`, matching local dev) right before loading `src/netMain.js` — point it at the deployed Colyseus server's `ws://`/`wss://` URL instead of editing `src/scenes/NetArenaScene.js`.
 - No `.gitignore` existed before this repo was set up for deployment prep; one now excludes `node_modules/`, `.env`, and OS junk files.
 
