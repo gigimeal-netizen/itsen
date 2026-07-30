@@ -439,6 +439,14 @@ class ArenaRoom extends Room {
     player.globalCooldown = 0;
     s.dash = null;
     s.knockback = null;
+    // A W/E press latched in onMessage("input") right before death (or any
+    // time while dead — the client keeps sending input, tryStartSkills()
+    // just never runs for a dead player to consume it) would otherwise
+    // survive in the scratch record and fire the instant this player
+    // becomes IDLE again, as a "phantom" skill use they never intended
+    // post-respawn.
+    s.wPressed = false;
+    s.ePressed = false;
   }
 
   // ---- Arena hazards -------------------------------------------------
@@ -677,6 +685,10 @@ class ArenaRoom extends Room {
     ts.dash = null;
     ts.knockback = null;
     ts.respawnClock = C.RESPAWN_DELAY_MS;
+    // See respawn()'s matching reset: a pending W/E latch shouldn't survive
+    // death even before we get there.
+    ts.wPressed = false;
+    ts.ePressed = false;
     this._onPlayerDied(killerSessionId);
   }
 
