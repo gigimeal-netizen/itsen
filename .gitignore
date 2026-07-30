@@ -5,3 +5,8 @@ npm-debug.log*
 
 .DS_Store
 Thumbs.db
+
+# Local Claude Code / Serena tooling config — machine-specific, not shared
+.mcp.json
+.serena/
+run_serena.bat
