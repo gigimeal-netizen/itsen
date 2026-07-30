@@ -36,10 +36,7 @@ export default class NetFighter {
         strokeThickness: 3,
       })
       .setOrigin(0.5, 1);
-    this.stateLabel = scene.add
-      .text(0, -PLAYER.RADIUS - 16, STATES.IDLE, { font: "11px monospace", color: "#ffffff" })
-      .setOrigin(0.5, 1);
-    this.container.add([this.kickCone, this.auraRing, this.figure, this.nicknameLabel, this.stateLabel]);
+    this.container.add([this.kickCone, this.auraRing, this.figure, this.nicknameLabel]);
 
     this._clock = 0;
     this._prevState = null;
@@ -129,16 +126,12 @@ export default class NetFighter {
 
     this.container.setPosition(this._renderX, this._renderY);
     this.container.setRotation(this._renderAngle);
-    // Counter-rotate the text labels so they stay upright/readable instead
+    // Counter-rotate the text label so it stays upright/readable instead
     // of spinning with the container's facing angle.
     this.nicknameLabel.setRotation(-this._renderAngle);
-    this.stateLabel.setRotation(-this._renderAngle);
     this.shadow.setPosition(this._renderX, this._renderY + PLAYER.RADIUS * 0.8);
     this.shadow.setAlpha(isAlive ? 1 : 0);
     this.container.setAlpha(isAlive ? 1 : 0);
-    this.stateLabel.setText(
-      state === STATES.CHARGING ? `${state} ${(chargeTime / 1000).toFixed(2)}s` : state
-    );
 
     if (!isAlive) {
       this.figure.clear();
