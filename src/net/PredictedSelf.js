@@ -25,6 +25,21 @@ import {
 // server and are adopted wholesale via reconcile(), same as a correction.
 const MOVE_STEP_LIMIT = 4; // px per obstacle-collision substep, mirrors the server's dash substepping
 
+// Our own duration-based transitions (charge release, parry/kick timeout,
+// dash end) run off an independently-accumulated local dt clock, so they
+// land a handful of ms off the server's own clock for the same transition
+// — not a real desync, just two clocks measuring the same fixed duration.
+// Without this grace window, reconcile() would see e.g. predicted already
+// in GCD while a snapshot still mid-flight (taken just before the server's
+// own timer fired) says KICKING, "correct" back into KICKING, and then the
+// very next frame's re-entry into GCD would re-fire KICKING's start SFX —
+// an audible double-trigger for something that only ever happened once.
+const SELF_TRANSITION_GRACE_MS = 250;
+
+function now() {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
 export default class PredictedSelf {
   constructor() {
     this.ready = false;
@@ -40,11 +55,23 @@ export default class PredictedSelf {
 
     this._dash = null; // { dx, dy, remaining }
     this._stateTimer = 0;
+    this._prevState = STATES.IDLE;
+    this._selfTransitionAt = -Infinity;
+    this._selfTransitionConsumed = true;
+  }
+
+  _setState(next) {
+    this._prevState = this.state;
+    this.state = next;
+    this._selfTransitionAt = now();
+    this._selfTransitionConsumed = false;
   }
 
   // Seeds/replaces predicted state wholesale from an authoritative snapshot
   // — first snapshot after join/respawn, and every "can't predict this"
-  // correction in reconcile().
+  // correction in reconcile(). Deliberately does NOT count as a self
+  // transition — it's server-driven, so it shouldn't buy the next
+  // reconcile() call any extra trust in what's about to be predicted.
   adopt(snap) {
     this.x = snap.x;
     this.y = snap.y;
@@ -56,6 +83,9 @@ export default class PredictedSelf {
     this.isAlive = snap.isAlive;
     this.score = snap.score;
     this._dash = null;
+    this._prevState = snap.state;
+    this._selfTransitionAt = -Infinity;
+    this._selfTransitionConsumed = true;
     this.ready = true;
   }
 
@@ -76,7 +106,7 @@ export default class PredictedSelf {
       case STATES.GCD:
         this._moveLike(dtMs, input, PLAYER.BASE_SPEED, hazards);
         this.globalCooldown = Math.max(0, this.globalCooldown - dtMs);
-        if (this.globalCooldown <= 0) this.state = STATES.IDLE;
+        if (this.globalCooldown <= 0) this._setState(STATES.IDLE);
         break;
       case STATES.CHARGING:
         this._stepCharging(dtMs, input, hazards);
@@ -98,7 +128,7 @@ export default class PredictedSelf {
   }
 
   _enterGCD(multiplier) {
-    this.state = STATES.GCD;
+    this._setState(STATES.GCD);
     this.globalCooldown = GLOBAL_COOLDOWN_MS * multiplier;
   }
 
@@ -111,18 +141,18 @@ export default class PredictedSelf {
 
   _tryStartSkills(input) {
     if (input.qHeld) {
-      this.state = STATES.CHARGING;
+      this._setState(STATES.CHARGING);
       this.chargeTime = 0;
       this._dash = null;
       return;
     }
     if (input.wPressed) {
-      this.state = STATES.PARRYING;
+      this._setState(STATES.PARRYING);
       this._stateTimer = W_PARRY.DURATION_MS;
       return;
     }
     if (input.ePressed) {
-      this.state = STATES.KICKING;
+      this._setState(STATES.KICKING);
       this._stateTimer = E_KICK.TOTAL_MS;
     }
   }
@@ -138,7 +168,7 @@ export default class PredictedSelf {
       const ratio = this.chargeTime / Q_DASH.MAX_CHARGE_MS;
       const distance = Q_DASH.MIN_DISTANCE + (Q_DASH.MAX_DISTANCE - Q_DASH.MIN_DISTANCE) * ratio;
       this._dash = { dx: Math.cos(this.angle), dy: Math.sin(this.angle), remaining: distance };
-      this.state = STATES.DASH;
+      this._setState(STATES.DASH);
     }
   }
 
@@ -161,7 +191,7 @@ export default class PredictedSelf {
       const ny = this.y + this._dash.dy * perStep;
       if (this._hitsObstacle(nx, ny, hazards)) {
         this._dash = null;
-        this.state = STATES.STUNNED;
+        this._setState(STATES.STUNNED);
         return;
       }
       this.x = nx;
@@ -215,27 +245,46 @@ export default class PredictedSelf {
       return;
     }
 
-    const bigMiss =
-      Boolean(snap.isAlive) !== Boolean(this.isAlive) ||
-      snap.state === STATES.STUNNED ||
-      snap.state === STATES.DEAD ||
-      this._category(snap.state) !== this._category(this.state) ||
-      Math.hypot(snap.x - this.x, snap.y - this.y) > PLAYER.RADIUS * 4;
+    const diedOrRespawned = Boolean(snap.isAlive) !== Boolean(this.isAlive);
+    // STUNNED/DEAD are only ever caused by another player's action (see the
+    // file comment) — always trust the server outright, self-prediction
+    // never claims these states on its own initiative.
+    const externallyCaused = snap.state === STATES.STUNNED || snap.state === STATES.DEAD;
+    const farAway = Math.hypot(snap.x - this.x, snap.y - this.y) > PLAYER.RADIUS * 4;
+    const categoryMismatch = this._category(snap.state) !== this._category(this.state);
 
-    if (bigMiss) {
+    // Only the ONE patch that was already in flight when we transitioned
+    // (still showing exactly the state we were in right before) gets this
+    // pass — bounds it to the single stale packet this is meant to cover
+    // instead of a whole time window, which would also swallow a genuine
+    // fast event (e.g. an opponent's dash landing on us within the first
+    // moment of our own PARRYING) that happens to resolve to that same
+    // state value.
+    const recentSelfTransition = !this._selfTransitionConsumed && now() - this._selfTransitionAt < SELF_TRANSITION_GRACE_MS;
+    const serverStillOnPreviousStage = snap.state === this._prevState;
+    const trustPrediction =
+      recentSelfTransition && serverStillOnPreviousStage && !externallyCaused && !diedOrRespawned;
+    if (trustPrediction) this._selfTransitionConsumed = true;
+
+    if (diedOrRespawned || externallyCaused || farAway || (categoryMismatch && !trustPrediction)) {
       this.adopt(snap);
       return;
     }
 
     // Minor drift: ease position toward the authoritative value instead of
-    // popping. State/timers aren't rendered as motion, so there's no harm
-    // in just taking the server's numbers directly.
+    // popping.
     this.x = Phaser.Math.Linear(this.x, snap.x, 0.5);
     this.y = Phaser.Math.Linear(this.y, snap.y, 0.5);
-    this.state = snap.state;
-    this.chargeTime = snap.chargeTime;
-    this.stunTimer = snap.stunTimer;
-    this.globalCooldown = snap.globalCooldown || 0;
+    if (!trustPrediction) {
+      // State/timers aren't rendered as motion, so there's no harm in just
+      // taking the server's numbers directly — except while trusting our
+      // own more-recent prediction above, where taking a stale timer back
+      // would just re-desync it from the state we're keeping.
+      this.state = snap.state;
+      this.chargeTime = snap.chargeTime;
+      this.stunTimer = snap.stunTimer;
+      this.globalCooldown = snap.globalCooldown || 0;
+    }
     this.isAlive = snap.isAlive;
     this.score = snap.score;
   }
