@@ -1,10 +1,17 @@
-// Phase 2/3 merge: the server (server/rooms/ArenaRoom.js) is fully
+// Phase 2/3 merge: the server (server/rooms/ArenaRoom.js) remains fully
 // authoritative for movement, the Q/W/E state machine, and arena hazards
-// (obstacle walls, octagon ring-out, permanent pits/quicksand) — this scene
-// only sends input intent and renders whatever state comes back, reusing
-// the same ruins art/arena shell as the single-player ArenaScene so both
-// feel like the same game. Player rendering is NetFighter (a visual-only,
-// server-driven twin of Combatant.js's stick-figure renderer).
+// (obstacle walls, octagon ring-out, permanent pits/quicksand) — nothing
+// here can decide a hit, a kill, or a state transition caused by another
+// player. This scene sends input intent and renders whatever state comes
+// back for everyone EXCEPT the local player, who is instead rendered from
+// PredictedSelf — a client-side mirror of the server's own-input-only FSM
+// logic, corrected against each authoritative snapshot as it arrives — so
+// your own actions show up immediately instead of after a network round
+// trip (see PredictedSelf.js for exactly what is/isn't predicted and why).
+// Reuses the same ruins art/arena shell as the single-player ArenaScene so
+// both feel like the same game. Player rendering is NetFighter (a
+// visual-only, server/prediction-driven twin of Combatant.js's stick-figure
+// renderer).
 //
 // Rather than wiring change-callbacks for the static hazard state
 // (obstacles/pits/quicksand — all generated once per room and never
@@ -23,6 +30,7 @@ import {
   NET_COUNTDOWN_MS,
 } from "../config/constants.js";
 import NetFighter from "../net/NetFighter.js";
+import PredictedSelf from "../net/PredictedSelf.js";
 import Sfx from "../audio/Sfx.js";
 import TouchControls from "../input/TouchControls.js";
 
@@ -69,6 +77,7 @@ export default class NetArenaScene extends Phaser.Scene {
 
     this.hud = document.getElementById("hud");
     this.fighters = new Map(); // sessionId -> NetFighter
+    this.predictedSelf = new PredictedSelf(); // see _wireRoom()/update() and PredictedSelf.js
     this.room = null;
     this.mySessionId = null;
     this.isSpectator = false;
@@ -858,6 +867,7 @@ export default class NetArenaScene extends Phaser.Scene {
     this.connectionError = null;
     for (const fighter of this.fighters.values()) fighter.destroy();
     this.fighters.clear();
+    this.predictedSelf = new PredictedSelf();
     this._latestSnapshots = new Map();
     this._snapshotBuffers = new Map();
     this._prevSnap.clear();
@@ -892,6 +902,7 @@ export default class NetArenaScene extends Phaser.Scene {
 
     for (const fighter of this.fighters.values()) fighter.destroy();
     this.fighters.clear();
+    this.predictedSelf = new PredictedSelf();
     // `this._latestSnapshots` MUST exist before any Colyseus callback can
     // fire — onAdd() fires immediately/synchronously for entries that
     // already exist in the state (e.g. our own player, present in the very
@@ -909,9 +920,11 @@ export default class NetArenaScene extends Phaser.Scene {
       this._latestSnapshots.set(sessionId, { ...player });
       this._snapshotBuffers.set(sessionId, []);
       this._pushSnapshot(sessionId, player);
+      if (sessionId === this.mySessionId) this.predictedSelf.adopt(player);
       $(player).onChange(() => {
         this._latestSnapshots.set(sessionId, { ...player });
         this._pushSnapshot(sessionId, player);
+        if (sessionId === this.mySessionId) this.predictedSelf.reconcile(player);
       });
 
       if (sessionId === this.mySessionId) {
@@ -1071,19 +1084,56 @@ export default class NetArenaScene extends Phaser.Scene {
 
     if (this.room) this._syncHazardsFromRoom();
 
+    // Local input + client-side prediction, computed and stepped BEFORE the
+    // render loop below so this frame's own action is reflected immediately
+    // instead of a frame late. See PredictedSelf.js for what's predicted.
+    if (this.room && !this.isSpectator) {
+      const lx = this.predictedSelf.ready ? this.predictedSelf.x : ARENA.WIDTH / 2;
+      const ly = this.predictedSelf.ready ? this.predictedSelf.y : ARENA.HEIGHT / 2;
+
+      let aimAngle;
+      let wantsMove;
+      if (this.touch.joystick.active) {
+        aimAngle = this.touch.joystick.angle;
+        wantsMove = this.touch.joystick.magnitude > 0.15; // deadzone
+      } else {
+        const pointer = this.input.activePointer;
+        const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+        aimAngle = Phaser.Math.Angle.Between(lx, ly, worldPoint.x, worldPoint.y);
+        wantsMove = this.pointerDown;
+      }
+
+      const touchW = this.touch.consumeWTap();
+      const touchE = this.touch.consumeETap();
+
+      const localInput = {
+        wantsMove,
+        aimAngle,
+        qHeld: this.qKey.isDown || this.touch.qHeld,
+        wPressed: this.wPressedFlag || touchW,
+        ePressed: this.ePressedFlag || touchE,
+      };
+
+      const canAct = this.room.state.matchPhase === "live";
+      const hazards = { obstacles: this.room.state.obstacles, quicksand: this.room.state.quicksand };
+      this.predictedSelf.step(delta, localInput, canAct, hazards);
+
+      this.room.send("input", localInput);
+      this.wPressedFlag = false;
+      this.ePressedFlag = false;
+    }
+
     if (this._latestSnapshots) {
       const renderTime = performance.now() - RENDER_DELAY_MS;
       for (const [sessionId, fighter] of this.fighters.entries()) {
         // The interpolation buffer trades latency for smoothness — worth it
         // for *other* players (their input timing isn't ours to control
-        // anyway), but stacking that extra ~100ms on top of the round-trip
-        // delay the local player already eats (no client-side prediction —
-        // every action waits for the server to confirm it) made your own
-        // character feel laggier, not smoother. So the local player always
-        // renders from the newest raw snapshot instead of the delayed one.
+        // anyway). The local player instead renders from PredictedSelf,
+        // stepped above from this very frame's input rather than waiting a
+        // network round trip to see anything happen.
         const snap =
-          sessionId === this.mySessionId
-            ? this._latestSnapshots.get(sessionId)
+          sessionId === this.mySessionId && this.predictedSelf.ready
+            ? this.predictedSelf
             : this._getInterpolatedSnapshot(sessionId, renderTime);
         if (!snap) continue;
         this._detectFighterEvents(sessionId, snap);
@@ -1093,37 +1143,6 @@ export default class NetArenaScene extends Phaser.Scene {
 
     this._updateHud();
     this._updateMatchUI();
-
-    if (!this.room || this.isSpectator) return;
-
-    const localSnap = this._latestSnapshots && this._latestSnapshots.get(this.mySessionId);
-    const lx = localSnap ? localSnap.x : ARENA.WIDTH / 2;
-    const ly = localSnap ? localSnap.y : ARENA.HEIGHT / 2;
-
-    let aimAngle;
-    let wantsMove;
-    if (this.touch.joystick.active) {
-      aimAngle = this.touch.joystick.angle;
-      wantsMove = this.touch.joystick.magnitude > 0.15; // deadzone
-    } else {
-      const pointer = this.input.activePointer;
-      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-      aimAngle = Phaser.Math.Angle.Between(lx, ly, worldPoint.x, worldPoint.y);
-      wantsMove = this.pointerDown;
-    }
-
-    const touchW = this.touch.consumeWTap();
-    const touchE = this.touch.consumeETap();
-
-    this.room.send("input", {
-      wantsMove,
-      aimAngle,
-      qHeld: this.qKey.isDown || this.touch.qHeld,
-      wPressed: this.wPressedFlag || touchW,
-      ePressed: this.ePressedFlag || touchE,
-    });
-    this.wPressedFlag = false;
-    this.ePressedFlag = false;
   }
 
   _updateHud() {
