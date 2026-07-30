@@ -1074,7 +1074,17 @@ export default class NetArenaScene extends Phaser.Scene {
     if (this._latestSnapshots) {
       const renderTime = performance.now() - RENDER_DELAY_MS;
       for (const [sessionId, fighter] of this.fighters.entries()) {
-        const snap = this._getInterpolatedSnapshot(sessionId, renderTime);
+        // The interpolation buffer trades latency for smoothness — worth it
+        // for *other* players (their input timing isn't ours to control
+        // anyway), but stacking that extra ~100ms on top of the round-trip
+        // delay the local player already eats (no client-side prediction —
+        // every action waits for the server to confirm it) made your own
+        // character feel laggier, not smoother. So the local player always
+        // renders from the newest raw snapshot instead of the delayed one.
+        const snap =
+          sessionId === this.mySessionId
+            ? this._latestSnapshots.get(sessionId)
+            : this._getInterpolatedSnapshot(sessionId, renderTime);
         if (!snap) continue;
         this._detectFighterEvents(sessionId, snap);
         fighter.sync(snap, delta);
