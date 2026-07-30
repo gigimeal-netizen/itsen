@@ -89,6 +89,11 @@ export default class NetArenaScene extends Phaser.Scene {
     this.obstaclesBuilt = false;
     this.pitsBuilt = false;
     this.quicksandBuilt = false;
+    // Previous frame's array length, for _syncHazardsFromRoom()'s
+    // steady-for-two-frames check before building hazard art.
+    this._lastObstacleCount = 0;
+    this._lastPitCount = 0;
+    this._lastQuicksandCount = 0;
 
     // Single-player-parity impact FX: blood/death-burst on kill, shrink-spin
     // on hazard death, impact-burst rings on big stuns, camera shake/flash,
@@ -1060,15 +1065,32 @@ export default class NetArenaScene extends Phaser.Scene {
     // (which would otherwise also block per-frame fighter sync/HUD/input).
     if (!st.obstacles || !st.pits || !st.quicksand) return;
 
-    if (!this.obstaclesBuilt && st.obstacles.length > 0) {
+    // A non-zero length isn't proof the array has fully arrived — on some
+    // connections the initial sync's ArraySchema entries were observed
+    // trickling in across a couple of frames rather than landing atomically,
+    // which built a room's hazard art from a partial list (some players'
+    // pits/obstacles were missing or in the wrong place vs. the always-full
+    // list the server actually checks collision against). Requiring the
+    // count to hold steady across two consecutive frames before building is
+    // cheap insurance against that — these lists never change once complete,
+    // so waiting one extra frame is invisible either way.
+    const obstacleCount = st.obstacles.length;
+    const pitCount = st.pits.length;
+    const quicksandCount = st.quicksand.length;
+
+    if (!this.obstaclesBuilt && obstacleCount > 0 && obstacleCount === this._lastObstacleCount) {
       this._buildObstacleArt(st.obstacles);
     }
-    if (!this.pitsBuilt && st.pits.length > 0) {
+    if (!this.pitsBuilt && pitCount > 0 && pitCount === this._lastPitCount) {
       this._buildPits(st.pits.map((p) => ({ x: p.x, y: p.y, w: p.w, h: p.h })));
     }
-    if (!this.quicksandBuilt && st.quicksand.length > 0) {
+    if (!this.quicksandBuilt && quicksandCount > 0 && quicksandCount === this._lastQuicksandCount) {
       this._buildQuicksandPatches(st.quicksand.map((q) => ({ x: q.x, y: q.y, w: q.w, h: q.h })));
     }
+
+    this._lastObstacleCount = obstacleCount;
+    this._lastPitCount = pitCount;
+    this._lastQuicksandCount = quicksandCount;
   }
 
   update(time, delta) {
