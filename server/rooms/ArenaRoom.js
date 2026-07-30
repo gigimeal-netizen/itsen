@@ -700,6 +700,16 @@ class ArenaRoom extends Room {
             other.state = C.STATES.IDLE; // exempt from GCD
             this.applyStun(dasher, ds, C.STUN_DURATION_MS);
           }
+        } else if (other.state === C.STATES.DASH) {
+          // Both mid-dash and overlapping: a same-tick clash (the two
+          // presses were close enough to land in one 16ms server tick, see
+          // C.SIMULATION_INTERVAL_MS) used to resolve in favor of whichever
+          // player iterates first in this.state.players (~join order) —
+          // an unintended side effect of the loop order, not real timing.
+          // Both dashes connect: no killer credited, it's a draw.
+          this.kill(other, os, null);
+          this.kill(dasher, ds, null);
+          break; // dasher is dead now; stop it piercing further targets
         } else {
           this.kill(other, os, dasherId);
           ds.dashKilled = true;
