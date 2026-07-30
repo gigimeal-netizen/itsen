@@ -12,31 +12,62 @@ root file first, then the relevant one(s) below for anything that goes deeper th
 - [`assets/CLAUDE.md`](assets/CLAUDE.md) — audio/image assets and how to register a new one in `preload()`.
 - [`vendor/CLAUDE.md`](vendor/CLAUDE.md) — the vendored `colyseus.js` bundle and how to update it.
 
+## Keeping this file accurate
+
+This file is living documentation, not a point-in-time snapshot — it previously described `net.html` as
+a bare-bones 2-player proof-of-concept long after it had grown a lobby, nicknames, customization, synced
+hazards, and full stick-figure rendering, which cost real time to notice and unwind. Treat correcting
+this file as part of the task, not a follow-up:
+
+- If a change alters what `index.html`/`net.html` supports, the deployment setup, a version pin, or an
+  architecture description below, update the relevant section (here or in the folder-scoped
+  `CLAUDE.md` it belongs to) in the same session.
+- Prefer pointing at the source of truth over hardcoding a value that will silently drift — e.g. "check
+  `net.html`'s `window.ARENA_SERVER_URL`" instead of naming today's live server URL, which will outlive
+  this sentence's accuracy the next time the deployment moves.
+
 ## Project status
 
-Phase 1 (single-player) and a Phase 2 multiplayer MVP are implemented. No bundler/package manager is used on the client — Phaser 3 is loaded via CDN and the client is plain ES modules served as static files. There is no lint/test setup yet.
+Phase 1 (single-player) is feature-complete. Phase 2's multiplayer has grown well past its original MVP
+scope — see below — and Phase 3's "bring Phase 1's polish into the networked client" goal is largely
+done; what's left is raising the room size past 4 players (spec target is 4–6). No bundler/package
+manager is used on the client — Phaser 3 is loaded via CDN and the client is plain ES modules served as
+static files. There is no lint/test setup.
 
 ### Running it
 
 - **Client static server** (serves both `index.html` and `net.html`): `python nocache_server.py` from the repo root — a custom no-cache static file server on port 8731 (plain `python -m http.server` was dropped; see git history/CLAUDE memory for why). Open `http://localhost:8731/index.html`.
 - **Phase 1 (single-player)**: `index.html` — no server process beyond the static file server above. Title screen → 3-2-1 countdown → ROUND or DEATHMATCH mode vs. a training dummy, full hazard/round/effects feature set.
-- **Phase 2 (multiplayer MVP)**: `net.html` — requires the Colyseus server running too:
+- **Phase 2/3 (multiplayer)**: `net.html` — requires the Colyseus server running too:
   ```
   cd server
   npm install   # first time only
   npm start     # node index.js — listens on ws://localhost:2567
   ```
-  Then open `http://localhost:8731/net.html` in two separate browser tabs/windows to get matched into the same 2-player room. `net.html` is intentionally a separate, minimal entry point (plain circle + facing line + state-color ring, no stick-figure rendering, no hazards/rounds) — it exists to prove out server-authoritative sync, not to duplicate Phase 1's polish. Server code lives in `server/` (plain CommonJS, not part of the client's ES module graph) — `server/rooms/ArenaRoom.js` is the authoritative FSM (a server-side port of `src/entities/Combatant.js`'s state machine, minus Phaser/Arcade physics), `server/schema/ArenaRoomState.js` defines the synced `@colyseus/schema` state, `server/constants.js` is a hand-kept-in-sync copy of the tuning values in `src/config/constants.js`.
-  - **Version pin note**: the official browser client (`colyseus.js`) hasn't published past `0.16.x` even though the `colyseus`/`@colyseus/core` server packages are on `0.17.x`+ on npm. The server's `package.json` deliberately pins `colyseus@^0.16.0` + `@colyseus/schema@^3.0.61` to match what `colyseus.js`'s bundled decoder actually expects — don't bump the server past the 0.16 line without also checking whether a matching `colyseus.js` release exists, or the wire protocol may silently break. The client bundle is vendored at `vendor/colyseus.js` (copied from `server/node_modules/colyseus.js/dist/colyseus.js`) since there's no client-side package manager step.
+  Then open `http://localhost:8731/net.html` — it now has its own title screen and lobby screen
+  (create/browse/quick-match a room, `GET /rooms` on the server backs the room list), a nickname +
+  color-swatch picker (persisted in `localStorage`, sent as join options and validated server-side), and
+  full parity with Phase 1's rendering (stick-figure `NetFighter`, synced arena hazards — obstacle walls,
+  octagon ring-out, permanent pits/quicksand — round/deathmatch modes, death VFX). Up to 4 players per
+  room today (`server/constants.js`'s `MAX_PLAYERS`); see "Project status" above re: the 4–6 spec target.
+  Server code lives in `server/` (plain CommonJS, not part of the client's ES module graph) —
+  `server/rooms/ArenaRoom.js` is the authoritative FSM (a server-side port of
+  `src/entities/Combatant.js`'s state machine, minus Phaser/Arcade physics), `server/schema/ArenaRoomState.js`
+  defines the synced `@colyseus/schema` state, `server/constants.js` is a hand-kept-in-sync copy of the
+  tuning values in `src/config/constants.js`.
+  - **Version pin note**: the official browser client (`colyseus.js`) hasn't published past `0.16.x` even though the `colyseus`/`@colyseus/core` server packages are on `0.17.x`+ on npm. Check `server/package.json` for the exact pinned versions currently in use (deliberately kept on the `0.16.x` line) — don't bump the server past that line without also checking whether a matching `colyseus.js` release exists, or the wire protocol may silently break. The client bundle is vendored at `vendor/colyseus.js` (copied from `server/node_modules/colyseus.js/dist/colyseus.js`) since there's no client-side package manager step.
 
 ### Deploying it
 
-Nothing is deployed yet — this just documents what's in place so an actual deploy is a config/hosting choice, not a code change.
+Deployed on Render: a static site for the client (`index.html`/`net.html`/`src/`/`vendor/`/`assets/`) and
+a separate Docker web service for `server/`. Check `net.html`'s `window.ARENA_SERVER_URL` for the
+server endpoint the deployed client currently points at — don't rely on this file for that, it changes
+independently of the code (e.g. swapping regions).
 
-- **Server** (`server/`) reads its port from `process.env.PORT` (falls back to 2567 — see `server/index.js`), so it runs as-is on any Node PaaS. `server/Dockerfile` builds a plain `node index.js` container (pin the base image's Node version to whatever `colyseus@0.16` supports — see the version-pin note above before bumping it). `server/.env.example` documents the one env var that matters.
+- **Server** (`server/`) reads its port from `process.env.PORT` (falls back to 2567 — see `server/index.js`), so it runs as-is on any Node PaaS. `server/Dockerfile` builds a plain `node index.js` container (pin the base image's Node version to whatever the pinned `colyseus` version supports — see the version-pin note above before bumping it). `server/.env.example` documents the one env var that matters.
 - **Client** (`index.html`, `net.html`, `src/`, `vendor/`, `assets/`) is static — any static host works, `nocache_server.py` is purely a local-dev convenience, not something a real deploy needs.
-- Since the client and server will usually end up on different hosts/ports in a real deploy, `net.html` sets `window.ARENA_SERVER_URL` (null by default = same-host `:2567`, matching local dev) right before loading `src/netMain.js` — point it at the deployed Colyseus server's `ws://`/`wss://` URL instead of editing `src/scenes/NetArenaScene.js`.
-- No `.gitignore` existed before this repo was set up for deployment prep; one now excludes `node_modules/`, `.env`, and OS junk files.
+- Since the client and server live on different Render services, `net.html` sets `window.ARENA_SERVER_URL` right before loading `src/netMain.js` — point it at the deployed Colyseus server's `ws://`/`wss://` URL instead of editing `src/scenes/NetArenaScene.js`.
+- `.gitignore` excludes `node_modules/`, `.env`, OS junk files, and local Claude Code/Serena tooling config (`.mcp.json`, `.serena/`, `run_serena.bat`).
 
 ## What this project is
 
@@ -66,7 +97,7 @@ This Q > E > W > Q triangle (spec diagram, §3) is the balance core — any new 
 
 ### Networking model (spec §6.2)
 
-Player state is a flat schema synced server → client: `{ id, x, y, angle, state, chargeTime, stunTimer, globalCooldown, isAlive }`. The server is authoritative for state transitions and hit detection; clients render/interpolate from this schema.
+Player state is a flat schema synced server → client: `{ id, x, y, angle, state, chargeTime, stunTimer, globalCooldown, isAlive }` per spec, plus `score`, `colorIndex`, and `nickname` added since (see `server/schema/ArenaRoomState.js`, the actual source of truth for this list). The server is authoritative for state transitions and hit detection; clients render/interpolate from this schema.
 
 ### Arena hazards (spec §5.2)
 
@@ -75,5 +106,5 @@ Ring-out (fall to death off-arena), periodic pitfalls, slow zones, and obstacles
 ## Suggested build order (per spec §7 roadmap)
 
 1. **Phase 1 (done):** Single-player FSM + Q/W/E skill mechanics (Phaser 3), plus bonus content beyond the original roadmap scope — ruins-themed art/arena shell, obstacle cover, quicksand/ring-out hazards, ROUND/DEATHMATCH modes, title screen, hit-stop/impact-burst juice. Entry point: `index.html`.
-2. **Phase 2 (MVP done):** 2-player sync over a Colyseus server — Q dash / W parry / E kick hit detection and stun sync, server-authoritative. Deliberately minimal on the client side (no hazards, no walls, no stick-figure rendering) to keep the MVP focused on the netcode itself. Entry point: `net.html` + `server/`.
-3. **Phase 3 (not started):** Bring Phase 1's arena (walls, ring-out, hazards) and full visual fidelity into the networked client, plus 6-player room matchmaking for FFA/2v2/3v3.
+2. **Phase 2 (done, grown past MVP):** started as a minimal 2-player sync proof-of-concept, since extended with a lobby/room list, nickname + color customization, and reconnect handling. Entry point: `net.html` + `server/`.
+3. **Phase 3 (in progress):** Phase 1's arena (walls, ring-out, hazards), full visual fidelity (stick-figure rendering, death VFX), and movement-smoothing (client-side interpolation, a raised server patch rate) are already in the networked client. Remaining: raise the 4-player room cap toward the spec's 4–6 range and matchmaking for 2v2/3v3, not just FFA.
