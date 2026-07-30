@@ -92,6 +92,11 @@ export default class NetFighter {
     this._lastX = x;
     this._lastY = y;
 
+    // isAlive going true -> false, once — the schema has no cutAngle field
+    // so `angle` (facing at the moment of death) stands in for it, same
+    // fallback Combatant.kill() uses (cutAngle = this.facing).
+    const justDied = this._prevAlive === true && !isAlive;
+
     if (state === STATES.CHARGING && prevState !== STATES.CHARGING) {
       this._chargeReadyPlayed = false;
       this._maxChargeSparkleClock = 0;
@@ -119,6 +124,8 @@ export default class NetFighter {
       );
     }
     this._prevAlive = isAlive;
+
+    if (justDied) this._die(x, y, angle);
 
     this.container.setPosition(this._renderX, this._renderY);
     this.container.setRotation(this._renderAngle);
@@ -251,6 +258,219 @@ export default class NetFighter {
       duration: 900,
       onComplete: () => gfx.destroy(),
     });
+  }
+
+  // ---- Death VFX (ported from Combatant.js's kill()) --------------------
+  // The server owns the FSM/kill decision here — this only reacts to
+  // isAlive flipping false (see the justDied check in sync()) and plays
+  // the same split-body + blood-spray visuals as single-player, at the
+  // position/facing the server reported at the moment of death.
+
+  _die(x, y, cutAngle) {
+    Sfx.death();
+    this.scene.cameras.main.shake(180, 0.011);
+    this.scene.cameras.main.flash(140, 90, 0, 0);
+    this._spawnDeathBurst(x, y, cutAngle);
+    this._spawnBloodEffect(x, y, cutAngle);
+  }
+
+  _spawnDeathBurst(x, y, cutAngle) {
+    const scene = this.scene;
+
+    this._spawnHalf(x, y, cutAngle, 1);
+    this._spawnHalf(x, y, cutAngle, -1);
+
+    // More chunks than before, and a third of them elongated streaks
+    // (rotated along their flight angle) rather than plain dots, so the
+    // burst reads as flying tissue/shrapnel instead of a firework of dots.
+    for (let i = 0; i < 10; i++) {
+      const side = i % 2 === 0 ? 1 : -1;
+      const spread = cutAngle + (Math.PI / 2) * side + (Math.random() - 0.5) * 0.7;
+      const dist = 34 + Math.random() * 55;
+      const elongated = i % 3 === 0;
+      const bit = elongated
+        ? scene.add.rectangle(x, y, 6 + Math.random() * 5, 2, this.color, 0.85).setRotation(spread)
+        : scene.add.circle(x, y, 2 + Math.random() * 2.5, this.color, 0.85);
+      scene.tweens.add({
+        targets: bit,
+        x: x + Math.cos(spread) * dist,
+        y: y + Math.sin(spread) * dist,
+        alpha: 0,
+        scale: elongated ? 0.4 : 1,
+        duration: 340 + Math.random() * 160,
+        ease: "Cubic.easeOut",
+        onComplete: () => bit.destroy(),
+      });
+    }
+
+    // Double shockwave: a tight white flash ring plus a slower, wider,
+    // blood-red one trailing behind it, instead of a single ring — gives
+    // the burst more weight without changing its basic "ring" language.
+    const ring = scene.add.circle(x, y, PLAYER.RADIUS, 0xffffff, 0);
+    ring.setStrokeStyle(3, 0xffffff, 0.9);
+    scene.tweens.add({
+      targets: ring,
+      radius: PLAYER.RADIUS + 46,
+      alpha: 0,
+      duration: 320,
+      ease: "Quad.easeOut",
+      onComplete: () => ring.destroy(),
+    });
+
+    const bloodRing = scene.add.circle(x, y, PLAYER.RADIUS * 0.6, 0xff2b2b, 0);
+    bloodRing.setStrokeStyle(4, 0xb3121f, 0.75);
+    scene.tweens.add({
+      targets: bloodRing,
+      radius: PLAYER.RADIUS + 70,
+      alpha: 0,
+      delay: 40,
+      duration: 460,
+      ease: "Quad.easeOut",
+      onComplete: () => bloodRing.destroy(),
+    });
+  }
+
+  // Draws one half-disc (flat edge along cutAngle) and flies it away
+  // perpendicular to that line: side=1 goes one way, side=-1 the other.
+  _spawnHalf(x, y, cutAngle, side) {
+    const scene = this.scene;
+    const r = PLAYER.RADIUS;
+    const start = side > 0 ? cutAngle : cutAngle + Math.PI;
+
+    const half = scene.add.graphics();
+    half.setPosition(x, y);
+    half.setScale(1.12); // starts slightly oversized and settles fast, reading as the halves popping apart under force
+    half.fillStyle(this.color, 1);
+    half.slice(0, 0, r, start, start + Math.PI, false);
+    half.fillPath();
+    half.lineStyle(2, 0xffffff, 0.85);
+    half.beginPath();
+    half.moveTo(Math.cos(start) * r, Math.sin(start) * r);
+    half.lineTo(Math.cos(start + Math.PI) * r, Math.sin(start + Math.PI) * r);
+    half.strokePath();
+    // Wet inner edge just inside the cut line, so the exposed cross-section
+    // reads as fresh gore instead of a flat colored silhouette edge.
+    half.lineStyle(4, 0x8a0f0f, 0.8);
+    half.beginPath();
+    half.moveTo(Math.cos(start) * r * 0.94, Math.sin(start) * r * 0.94);
+    half.lineTo(Math.cos(start + Math.PI) * r * 0.94, Math.sin(start + Math.PI) * r * 0.94);
+    half.strokePath();
+
+    const flyAngle = cutAngle + (Math.PI / 2) * side;
+    const flyDist = 85 + Math.random() * 40;
+    const forwardDrift = 18;
+    const spin = side * (1.6 + Math.random() * 1.2);
+
+    scene.tweens.add({ targets: half, scaleX: 1, scaleY: 1, duration: 90, ease: "Quad.easeOut" });
+    scene.tweens.add({
+      targets: half,
+      x: x + Math.cos(flyAngle) * flyDist + Math.cos(cutAngle) * forwardDrift,
+      y: y + Math.sin(flyAngle) * flyDist + Math.sin(cutAngle) * forwardDrift,
+      rotation: spin,
+      duration: 520,
+      ease: "Cubic.easeOut",
+    });
+    // Fade/shrink is held off until the tail end of the flight rather than
+    // running the whole time, so the halves feel like they lose momentum
+    // and slump instead of just dissolving mid-air.
+    scene.tweens.add({
+      targets: half,
+      alpha: 0,
+      scaleX: 0.7,
+      scaleY: 0.7,
+      delay: 260,
+      duration: 260,
+      ease: "Cubic.easeIn",
+      onComplete: () => half.destroy(),
+    });
+  }
+
+  // Ground-decal blood: an irregular pool at the kill spot plus a wide spray
+  // of droplets that fly out from the cut and leave their own small stains
+  // where they land. Everything renders below combatants (depth -1) but
+  // above the arena floor (depth -10, see ArenaScene).
+  _spawnBloodEffect(x, y, cutAngle) {
+    const scene = this.scene;
+    const cx = x;
+    const cy = y;
+    const bloodColors = [0x8a0f0f, 0x6b0a0a, 0xa11616];
+
+    // Directional spray fan on each side of the cut — a wide translucent
+    // wedge instead of just an even circular pool — reads as a gush along
+    // the slice rather than a puddle appearing from nowhere.
+    for (const side of [1, -1]) {
+      const fan = scene.add.graphics().setDepth(-1).setAlpha(0);
+      const centerAngle = cutAngle + (Math.PI / 2) * side;
+      const halfSpread = 0.75;
+      fan.fillStyle(Phaser.Utils.Array.GetRandom(bloodColors), 0.35);
+      fan.beginPath();
+      fan.moveTo(cx, cy);
+      fan.arc(cx, cy, 60 + Math.random() * 40, centerAngle - halfSpread, centerAngle + halfSpread, false);
+      fan.closePath();
+      fan.fillPath();
+      scene.tweens.add({ targets: fan, alpha: 1, duration: 90 });
+      scene.tweens.add({
+        targets: fan,
+        alpha: 0,
+        delay: 4500,
+        duration: 1500,
+        onComplete: () => fan.destroy(),
+      });
+    }
+
+    const pool = scene.add.graphics().setDepth(-1).setAlpha(0);
+    for (let i = 0; i < 20; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const dist = Math.random() * 30;
+      const rad = 6 + Math.random() * 18;
+      pool.fillStyle(Phaser.Utils.Array.GetRandom(bloodColors), 0.5 + Math.random() * 0.3);
+      pool.fillCircle(cx + Math.cos(ang) * dist, cy + Math.sin(ang) * dist, rad);
+    }
+    scene.tweens.add({ targets: pool, alpha: 1, duration: 120 });
+    scene.tweens.add({
+      targets: pool,
+      alpha: 0,
+      delay: 7000,
+      duration: 1500,
+      onComplete: () => pool.destroy(),
+    });
+
+    const dropletCount = 34;
+    for (let i = 0; i < dropletCount; i++) {
+      const side = i % 2 === 0 ? 1 : -1;
+      const spreadAngle = cutAngle + (Math.PI / 2) * side + (Math.random() - 0.5) * 2.2;
+      const dist = 18 + Math.random() * 110;
+      const size = 2 + Math.random() * 3.5;
+      const landX = cx + Math.cos(spreadAngle) * dist;
+      const landY = cy + Math.sin(spreadAngle) * dist;
+
+      // Elongated along its travel direction, and rotated to match, so it
+      // reads as a flung droplet mid-flight rather than a dot sliding
+      // sideways.
+      const droplet = scene.add
+        .ellipse(cx, cy, size * 2.2, size, Phaser.Utils.Array.GetRandom(bloodColors), 0.9)
+        .setRotation(spreadAngle);
+      droplet.setDepth(-1);
+      scene.tweens.add({
+        targets: droplet,
+        x: landX,
+        y: landY,
+        duration: 160 + Math.random() * 160,
+        ease: "Cubic.easeOut",
+        onComplete: () => {
+          droplet.destroy();
+          const stain = scene.add.circle(landX, landY, size * 1.1, 0x7a0f0f, 0.65);
+          stain.setDepth(-1);
+          scene.tweens.add({
+            targets: stain,
+            alpha: 0,
+            delay: 6000,
+            duration: 1200,
+            onComplete: () => stain.destroy(),
+          });
+        },
+      });
+    }
   }
 
   _computePose(state, chargeTime, moving) {
