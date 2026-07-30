@@ -113,8 +113,8 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this._spawnDeathBurst(cutAngle);
     this._spawnBloodEffect(cutAngle);
     Sfx.death();
-    this.scene.cameras.main.shake(160, 0.008);
-    this.scene.cameras.main.flash(120, 60, 0, 0);
+    this.scene.cameras.main.shake(180, 0.011);
+    this.scene.cameras.main.flash(140, 90, 0, 0);
     this._respawnClock = RESPAWN_DELAY_MS;
   }
 
@@ -789,22 +789,34 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this._spawnHalf(cutAngle, 1);
     this._spawnHalf(cutAngle, -1);
 
-    for (let i = 0; i < 6; i++) {
+    // More chunks than before, and a third of them elongated streaks
+    // (rotated along their flight angle) rather than plain dots, so the
+    // burst reads as flying tissue/shrapnel instead of a firework of dots.
+    for (let i = 0; i < 10; i++) {
       const side = i % 2 === 0 ? 1 : -1;
-      const spread = cutAngle + (Math.PI / 2) * side + (Math.random() - 0.5) * 0.6;
-      const dist = 30 + Math.random() * 40;
-      const bit = scene.add.circle(this.x, this.y, 2 + Math.random() * 2, this.color, 0.85);
+      const spread = cutAngle + (Math.PI / 2) * side + (Math.random() - 0.5) * 0.7;
+      const dist = 34 + Math.random() * 55;
+      const elongated = i % 3 === 0;
+      const bit = elongated
+        ? scene.add
+            .rectangle(this.x, this.y, 6 + Math.random() * 5, 2, this.color, 0.85)
+            .setRotation(spread)
+        : scene.add.circle(this.x, this.y, 2 + Math.random() * 2.5, this.color, 0.85);
       scene.tweens.add({
         targets: bit,
         x: this.x + Math.cos(spread) * dist,
         y: this.y + Math.sin(spread) * dist,
         alpha: 0,
-        duration: 320 + Math.random() * 120,
+        scale: elongated ? 0.4 : 1,
+        duration: 340 + Math.random() * 160,
         ease: "Cubic.easeOut",
         onComplete: () => bit.destroy(),
       });
     }
 
+    // Double shockwave: a tight white flash ring plus a slower, wider,
+    // blood-red one trailing behind it, instead of a single ring — gives
+    // the burst more weight without changing its basic "ring" language.
     const ring = scene.add.circle(this.x, this.y, PLAYER.RADIUS, 0xffffff, 0);
     ring.setStrokeStyle(3, 0xffffff, 0.9);
     scene.tweens.add({
@@ -814,6 +826,18 @@ export default class Combatant extends Phaser.GameObjects.Container {
       duration: 320,
       ease: "Quad.easeOut",
       onComplete: () => ring.destroy(),
+    });
+
+    const bloodRing = scene.add.circle(this.x, this.y, PLAYER.RADIUS * 0.6, 0xff2b2b, 0);
+    bloodRing.setStrokeStyle(4, 0xb3121f, 0.75);
+    scene.tweens.add({
+      targets: bloodRing,
+      radius: PLAYER.RADIUS + 70,
+      alpha: 0,
+      delay: 40,
+      duration: 460,
+      ease: "Quad.easeOut",
+      onComplete: () => bloodRing.destroy(),
     });
   }
 
@@ -826,6 +850,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
 
     const half = scene.add.graphics();
     half.setPosition(this.x, this.y);
+    half.setScale(1.12); // starts slightly oversized and settles fast, reading as the halves popping apart under force
     half.fillStyle(this.color, 1);
     half.slice(0, 0, r, start, start + Math.PI, false);
     half.fillPath();
@@ -834,19 +859,39 @@ export default class Combatant extends Phaser.GameObjects.Container {
     half.moveTo(Math.cos(start) * r, Math.sin(start) * r);
     half.lineTo(Math.cos(start + Math.PI) * r, Math.sin(start + Math.PI) * r);
     half.strokePath();
+    // Wet inner edge just inside the cut line, so the exposed cross-section
+    // reads as fresh gore instead of a flat colored silhouette edge.
+    half.lineStyle(4, 0x8a0f0f, 0.8);
+    half.beginPath();
+    half.moveTo(Math.cos(start) * r * 0.94, Math.sin(start) * r * 0.94);
+    half.lineTo(Math.cos(start + Math.PI) * r * 0.94, Math.sin(start + Math.PI) * r * 0.94);
+    half.strokePath();
 
     const flyAngle = cutAngle + (Math.PI / 2) * side;
-    const flyDist = 70 + Math.random() * 30;
+    const flyDist = 85 + Math.random() * 40;
     const forwardDrift = 18;
+    const spin = side * (1.6 + Math.random() * 1.2);
 
+    scene.tweens.add({ targets: half, scaleX: 1, scaleY: 1, duration: 90, ease: "Quad.easeOut" });
     scene.tweens.add({
       targets: half,
       x: this.x + Math.cos(flyAngle) * flyDist + Math.cos(cutAngle) * forwardDrift,
       y: this.y + Math.sin(flyAngle) * flyDist + Math.sin(cutAngle) * forwardDrift,
-      rotation: side * (1.2 + Math.random() * 0.8),
-      alpha: 0,
-      duration: 480,
+      rotation: spin,
+      duration: 520,
       ease: "Cubic.easeOut",
+    });
+    // Fade/shrink is held off until the tail end of the flight rather than
+    // running the whole time, so the halves feel like they lose momentum
+    // and slump instead of just dissolving mid-air.
+    scene.tweens.add({
+      targets: half,
+      alpha: 0,
+      scaleX: 0.7,
+      scaleY: 0.7,
+      delay: 260,
+      duration: 260,
+      ease: "Cubic.easeIn",
       onComplete: () => half.destroy(),
     });
   }
@@ -861,11 +906,34 @@ export default class Combatant extends Phaser.GameObjects.Container {
     const cy = this.y;
     const bloodColors = [0x8a0f0f, 0x6b0a0a, 0xa11616];
 
+    // Directional spray fan on each side of the cut — a wide translucent
+    // wedge instead of just an even circular pool — reads as a gush along
+    // the slice rather than a puddle appearing from nowhere.
+    for (const side of [1, -1]) {
+      const fan = scene.add.graphics().setDepth(-1).setAlpha(0);
+      const centerAngle = cutAngle + (Math.PI / 2) * side;
+      const halfSpread = 0.75;
+      fan.fillStyle(Phaser.Utils.Array.GetRandom(bloodColors), 0.35);
+      fan.beginPath();
+      fan.moveTo(cx, cy);
+      fan.arc(cx, cy, 60 + Math.random() * 40, centerAngle - halfSpread, centerAngle + halfSpread, false);
+      fan.closePath();
+      fan.fillPath();
+      scene.tweens.add({ targets: fan, alpha: 1, duration: 90 });
+      scene.tweens.add({
+        targets: fan,
+        alpha: 0,
+        delay: 4500,
+        duration: 1500,
+        onComplete: () => fan.destroy(),
+      });
+    }
+
     const pool = scene.add.graphics().setDepth(-1).setAlpha(0);
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 20; i++) {
       const ang = Math.random() * Math.PI * 2;
-      const dist = Math.random() * 26;
-      const rad = 6 + Math.random() * 15;
+      const dist = Math.random() * 30;
+      const rad = 6 + Math.random() * 18;
       pool.fillStyle(Phaser.Utils.Array.GetRandom(bloodColors), 0.5 + Math.random() * 0.3);
       pool.fillCircle(cx + Math.cos(ang) * dist, cy + Math.sin(ang) * dist, rad);
     }
@@ -873,36 +941,41 @@ export default class Combatant extends Phaser.GameObjects.Container {
     scene.tweens.add({
       targets: pool,
       alpha: 0,
-      delay: 6000,
+      delay: 7000,
       duration: 1500,
       onComplete: () => pool.destroy(),
     });
 
-    const dropletCount = 22;
+    const dropletCount = 34;
     for (let i = 0; i < dropletCount; i++) {
       const side = i % 2 === 0 ? 1 : -1;
       const spreadAngle = cutAngle + (Math.PI / 2) * side + (Math.random() - 0.5) * 2.2;
-      const dist = 18 + Math.random() * 95;
-      const size = 2 + Math.random() * 3;
+      const dist = 18 + Math.random() * 110;
+      const size = 2 + Math.random() * 3.5;
       const landX = cx + Math.cos(spreadAngle) * dist;
       const landY = cy + Math.sin(spreadAngle) * dist;
 
-      const droplet = scene.add.circle(cx, cy, size, Phaser.Utils.Array.GetRandom(bloodColors), 0.9);
+      // Elongated along its travel direction, and rotated to match, so it
+      // reads as a flung droplet mid-flight rather than a dot sliding
+      // sideways.
+      const droplet = scene.add
+        .ellipse(cx, cy, size * 2.2, size, Phaser.Utils.Array.GetRandom(bloodColors), 0.9)
+        .setRotation(spreadAngle);
       droplet.setDepth(-1);
       scene.tweens.add({
         targets: droplet,
         x: landX,
         y: landY,
-        duration: 180 + Math.random() * 160,
+        duration: 160 + Math.random() * 160,
         ease: "Cubic.easeOut",
         onComplete: () => {
           droplet.destroy();
-          const stain = scene.add.circle(landX, landY, size * 0.9, 0x7a0f0f, 0.65);
+          const stain = scene.add.circle(landX, landY, size * 1.1, 0x7a0f0f, 0.65);
           stain.setDepth(-1);
           scene.tweens.add({
             targets: stain,
             alpha: 0,
-            delay: 5000,
+            delay: 6000,
             duration: 1200,
             onComplete: () => stain.destroy(),
           });
