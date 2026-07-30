@@ -18,7 +18,8 @@ defineTypes(PlayerState, {
   globalCooldown: "number",
   isAlive: "boolean",
   score: "number",
-  colorIndex: "number", // stable per-seat index (join order), 0..3 — client picks a color/label from it
+  colorIndex: "number", // chosen color swatch, 0..COLOR_COUNT-1 (see ArenaRoom.COLOR_COUNT) — client renders from it
+  nickname: "string", // display name chosen in the lobby, shown above the fighter in-game
 });
 
 // A plain axis-aligned rect — reused for obstacles, pits, AND quicksand

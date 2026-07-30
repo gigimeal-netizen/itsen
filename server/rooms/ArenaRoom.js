@@ -14,6 +14,37 @@ const SPAWN_POINTS = C.NET_SPAWN_POINTS.map((s) => ({
   y: C.ARENA_HEIGHT * s.y,
 }));
 
+// Must match the swatch count in NetArenaScene's PLAYER_COLORS palette —
+// a client-picked colorIndex outside this range is rejected in favor of a
+// seat-based fallback (see onJoin() below).
+const COLOR_COUNT = 6;
+const DEFAULT_NICKNAME = "전사";
+
+function sanitizeNickname(raw) {
+  if (typeof raw !== "string") return DEFAULT_NICKNAME;
+  const trimmed = raw.trim().slice(0, 12);
+  return trimmed || DEFAULT_NICKNAME;
+}
+
+function sanitizeColorIndex(raw, fallback) {
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 && n < COLOR_COUNT ? n : fallback;
+}
+
+// Two players picking the same nickname would make the scoreboard/kill-flash
+// text ambiguous (e.g. "철수 5 · 철수 3") even though their color still tells
+// them apart in-game — so a joiner whose nickname collides with someone
+// already seated gets "#2", "#3", ... appended (trimming the base to make
+// room, since PlayerState.nickname is capped at 12 chars total).
+function dedupeNickname(nickname, existingNicknames) {
+  if (!existingNicknames.has(nickname)) return nickname;
+  for (let n = 2; ; n++) {
+    const suffix = `#${n}`;
+    const candidate = nickname.slice(0, 12 - suffix.length) + suffix;
+    if (!existingNicknames.has(candidate)) return candidate;
+  }
+}
+
 const FLOOR_BOUNDS = {
   x: C.RING_OUT_MARGIN,
   y: C.RING_OUT_MARGIN,
@@ -67,9 +98,19 @@ function circleHitsRect(x, y, radius, rect) {
 }
 
 class ArenaRoom extends Room {
-  onCreate() {
+  onCreate(options) {
     this.maxClients = C.MAX_CLIENTS;
     this.setState(new ArenaRoomState());
+    // Lobby display name — chosen by whoever creates the room (see
+    // net.html's lobby screen / client.create() call), not synced into the
+    // schema since it's only needed pre-join (client.getAvailableRooms()
+    // reads room metadata, not schema state). Kept in `this._roomName` and
+    // re-applied by _updateMetadata() so mode changes don't clobber it.
+    this._roomName =
+      options && typeof options.name === "string" && options.name.trim()
+        ? options.name.trim().slice(0, 24)
+        : "이름없는 방";
+    this._updateMetadata();
     // Everything NOT in the synced schema (dash vectors, one-shot hit
     // flags, raw input intent) lives here, keyed by sessionId — it never
     // needs to reach the client.
@@ -124,9 +165,34 @@ class ArenaRoom extends Room {
         this.respawn(player, this.scratch.get(sessionId));
       }
       this.startCountdown();
+      this._updateMetadata();
     });
 
     this.setSimulationInterval((dtMs) => this.tick(dtMs), C.SIMULATION_INTERVAL_MS);
+    // Colyseus defaults to broadcasting schema patches at 20Hz (50ms), well
+    // below the 60Hz simulation tick above — the client only has a fresh
+    // target to move towards this often, which is the main source of the
+    // "stutter/pushed" feeling multiplayer has vs. single-player's every-
+    // frame Arcade physics. Doubling it to ~30Hz halves the gap the client's
+    // interpolation buffer (NetArenaScene._getInterpolatedSnapshot) has to
+    // smooth over, at a modest bandwidth cost for a 4-16 client room.
+    this.setPatchRate(1000 / 30);
+  }
+
+  // Refreshes the metadata net.html's lobby fetches (see server/index.js's
+  // "/rooms" endpoint) — name (chosen once, at creation), current mode, and
+  // active-seat counts. Player counts need to be here explicitly (rather
+  // than relying on Colyseus's own live `clients` count) because `clients`
+  // includes spectators, up to MAX_CLIENTS (16) — not the 4-seat cap the
+  // lobby actually needs to know about to grey out "입장" on a full match.
+  _updateMetadata() {
+    this.setMetadata({
+      name: this._roomName,
+      mode: this.state.mode,
+      playerCount: this.state.players.size,
+      maxPlayers: C.MAX_PLAYERS,
+      spectatorCount: this.state.spectatorCount,
+    });
   }
 
   onJoin(client, options) {
@@ -139,6 +205,7 @@ class ArenaRoom extends Room {
       this.spectatorIds.add(client.sessionId);
       this.state.spectatorCount++;
       console.log(`[arena] ${client.sessionId} joined as spectator (${this.state.spectatorCount} watching)`);
+      this._updateMetadata();
       return;
     }
 
@@ -156,7 +223,9 @@ class ArenaRoom extends Room {
     player.globalCooldown = 0;
     player.isAlive = true;
     player.score = 0;
-    player.colorIndex = index;
+    player.colorIndex = sanitizeColorIndex(options?.colorIndex, index % COLOR_COUNT);
+    const existingNicknames = new Set([...this.state.players.values()].map((p) => p.nickname));
+    player.nickname = dedupeNickname(sanitizeNickname(options?.nickname), existingNicknames);
     this.state.players.set(client.sessionId, player);
 
     this.scratch.set(client.sessionId, {
@@ -189,6 +258,7 @@ class ArenaRoom extends Room {
     } else if (this.state.players.size >= 2 && this.state.matchPhase === "waiting") {
       this.joinGraceMs = C.JOIN_GRACE_MS;
     }
+    this._updateMetadata();
   }
 
   // consented === true means the client called room.leave() itself (or the
@@ -215,6 +285,7 @@ class ArenaRoom extends Room {
       this.spectatorIds.delete(client.sessionId);
       this.state.spectatorCount--;
       console.log(`[arena] ${client.sessionId} (spectator) left`);
+      this._updateMetadata();
       return;
     }
 
@@ -244,6 +315,7 @@ class ArenaRoom extends Room {
       this._onPlayerDied(null);
     }
     console.log(`[arena] ${client.sessionId} left`);
+    this._updateMetadata();
   }
 
   // ---- Match flow (ROUND/DEATHMATCH mode, countdown, round-end) --------
