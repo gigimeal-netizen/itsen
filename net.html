@@ -150,19 +150,123 @@
 
   #titleButtons { display: flex; gap: 12px; opacity: 0; animation: fadeInUp 0.7s ease 0.6s forwards; }
   #titleButtons #startBtn { animation: btnPulse 2s ease-in-out 1.3s infinite; opacity: 1; }
-  #spectateBtn {
-    font: 700 14px/1 "Consolas", monospace;
-    letter-spacing: 1px;
-    padding: 14px 22px;
+  /* ---- Lobby screen: room list + create-room form -------------------- */
+  #lobbyScreen {
+    position: absolute; inset: 0; z-index: 21;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px;
+    background:
+      radial-gradient(ellipse at center, rgba(20, 15, 8, 0.55) 0%, rgba(6, 4, 2, 0.92) 75%),
+      #0d0b08;
+    color: #dfd0b0;
+    font-family: "Consolas", monospace;
+    padding: 20px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+  }
+  #lobbyScreen.hidden { display: none; }
+  #lobbyScreen h2 {
+    margin: 0; font-size: clamp(20px, 5vw, 28px); letter-spacing: 2px; color: #ffcc66;
+  }
+  #lobbyPanel {
+    width: min(92vw, 480px);
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  /* ---- Player profile: nickname + color swatch picker ----------------- */
+  #lobbyProfile {
+    display: flex; flex-direction: column; gap: 8px;
+    border: 1px solid rgba(201, 138, 58, 0.25);
     border-radius: 8px;
-    border: 2px solid rgba(223, 208, 176, 0.4);
+    padding: 10px 12px;
+    background: rgba(18, 14, 8, 0.4);
+  }
+  #lobbyProfile .lobby-label { font-size: 12px; opacity: 0.7; }
+  #lobbyNickInput {
+    font: 13px "Consolas", monospace;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(201, 138, 58, 0.4);
+    background: rgba(18, 14, 8, 0.6);
+    color: #dfd0b0;
+  }
+  #lobbyNickInput::placeholder { color: rgba(223, 208, 176, 0.4); }
+  #lobbyColorRow { display: flex; gap: 8px; }
+  .color-swatch {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    border: 2px solid rgba(223, 208, 176, 0.3);
+    cursor: pointer;
+    padding: 0;
+  }
+  .color-swatch.selected {
+    border-color: #ffcc66;
+    box-shadow: 0 0 0 2px rgba(255, 204, 102, 0.4);
+  }
+  #lobbyCreateRow {
+    display: flex; gap: 8px;
+  }
+  #lobbyNameInput {
+    flex: 1;
+    font: 13px "Consolas", monospace;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(201, 138, 58, 0.4);
+    background: rgba(18, 14, 8, 0.6);
+    color: #dfd0b0;
+  }
+  #lobbyNameInput::placeholder { color: rgba(223, 208, 176, 0.4); }
+  #lobbyCreateBtn, #lobbyRefreshBtn, #lobbyQuickBtn, #lobbyBackBtn {
+    font: 700 12px/1 "Consolas", monospace;
+    letter-spacing: 0.5px;
+    padding: 10px 14px;
+    border-radius: 6px;
+    border: 2px solid #c98a3a;
+    background: #c98a3a;
+    color: #1a1206;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #lobbyRefreshBtn, #lobbyBackBtn {
     background: transparent;
+    border-color: rgba(223, 208, 176, 0.4);
+    color: #dfd0b0;
+  }
+  #lobbyQuickBtn { width: 100%; }
+  #lobbyToolbar { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+  #lobbyToolbar .lobby-label { font-size: 12px; opacity: 0.7; }
+  #lobbyRoomList {
+    display: flex; flex-direction: column; gap: 8px;
+    max-height: 40vh; overflow-y: auto;
+    border: 1px solid rgba(201, 138, 58, 0.25);
+    border-radius: 8px;
+    padding: 8px;
+    background: rgba(18, 14, 8, 0.4);
+  }
+  #lobbyRoomList .empty { opacity: 0.5; font-size: 12px; text-align: center; padding: 18px 0; }
+  .lobby-room-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(201, 138, 58, 0.2);
+  }
+  .lobby-room-row .info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .lobby-room-row .name { font-size: 13px; font-weight: 700; color: #ffcc66; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lobby-room-row .meta { font-size: 11px; opacity: 0.65; }
+  .lobby-room-row .actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .lobby-room-row button {
+    font: 700 11px/1 "Consolas", monospace;
+    padding: 7px 10px;
+    border-radius: 5px;
+    border: 1px solid rgba(201, 138, 58, 0.45);
+    background: rgba(0, 0, 0, 0.3);
     color: #dfd0b0;
     cursor: pointer;
-    transition: transform 0.1s ease, border-color 0.15s ease;
   }
-  #spectateBtn:hover { border-color: #dfd0b0; transform: scale(1.04); }
-  #spectateBtn:active { transform: translateY(1px) scale(0.98); }
+  .lobby-room-row button.primary { background: #c98a3a; color: #1a1206; border-color: #c98a3a; }
+  .lobby-room-row button:disabled { opacity: 0.4; cursor: default; }
+  #lobbyError { font-size: 12px; color: #ff9f9f; min-height: 1em; }
 
   #leaveBtn {
     position: absolute; top: 10px; right: 10px; z-index: 6;
@@ -274,7 +378,28 @@
   </div>
   <div id="titleButtons">
     <button id="startBtn">시작하기</button>
-    <button id="spectateBtn">관전하기</button>
+  </div>
+</div>
+<div id="lobbyScreen" class="hidden">
+  <h2>방 목록</h2>
+  <div id="lobbyPanel">
+    <div id="lobbyProfile">
+      <span class="lobby-label">내 닉네임 / 캐릭터 색상</span>
+      <input id="lobbyNickInput" type="text" placeholder="닉네임 (최대 12자)" maxlength="12" />
+      <div id="lobbyColorRow"></div>
+    </div>
+    <button id="lobbyQuickBtn">⚡ 빠른 매칭 (아무 방이나 입장)</button>
+    <div id="lobbyCreateRow">
+      <input id="lobbyNameInput" type="text" placeholder="새 방 이름 (선택)" maxlength="24" />
+      <button id="lobbyCreateBtn">방 만들기</button>
+    </div>
+    <div id="lobbyToolbar">
+      <span class="lobby-label">참여 가능한 방</span>
+      <button id="lobbyRefreshBtn">↻ 새로고침</button>
+    </div>
+    <div id="lobbyRoomList"><div class="empty">불러오는 중...</div></div>
+    <div id="lobbyError"></div>
+    <button id="lobbyBackBtn">← 타이틀로</button>
   </div>
 </div>
 <div id="hud">연결 중...</div>

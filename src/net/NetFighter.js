@@ -16,7 +16,7 @@ import Sfx from "../audio/Sfx.js";
 // kick-cone sweep — a close-enough visual approximation since the shared
 // E_KICK constants give it the same timing the server judges hits with.
 export default class NetFighter {
-  constructor(scene, color) {
+  constructor(scene, color, nickname) {
     this.scene = scene;
     this.color = color;
 
@@ -25,10 +25,21 @@ export default class NetFighter {
     this.kickCone = scene.add.graphics();
     this.auraRing = scene.add.graphics();
     this.figure = scene.add.graphics();
+    // Nickname above the fighter's head, always upright regardless of the
+    // container's rotation (set on a Phaser container, text would otherwise
+    // spin with the facing angle) — see the counter-rotation in sync().
+    this.nicknameLabel = scene.add
+      .text(0, -PLAYER.RADIUS - 30, nickname || "", {
+        font: "bold 12px monospace",
+        color: "#ffe9c4",
+        stroke: "#1a1206",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5, 1);
     this.stateLabel = scene.add
       .text(0, -PLAYER.RADIUS - 16, STATES.IDLE, { font: "11px monospace", color: "#ffffff" })
       .setOrigin(0.5, 1);
-    this.container.add([this.kickCone, this.auraRing, this.figure, this.stateLabel]);
+    this.container.add([this.kickCone, this.auraRing, this.figure, this.nicknameLabel, this.stateLabel]);
 
     this._clock = 0;
     this._prevState = null;
@@ -36,11 +47,11 @@ export default class NetFighter {
     this._lastX = 0;
     this._lastY = 0;
 
-    // Render-side position/angle smoothing: the server only updates the
-    // schema at ~30Hz (SIMULATION_INTERVAL_MS), but we render at whatever
-    // the display refreshes at, so snapping straight to each new snapshot
-    // looks stepped next to single-player's every-frame Arcade physics.
-    // These ease toward the latest snapshot instead of jumping to it.
+    // Render-side position/angle smoothing: `snapshot` here is already an
+    // interpolated point in time (see NetArenaScene's snapshot buffer /
+    // _getInterpolatedSnapshot), not a raw server patch, but we still ease
+    // toward it rather than snapping straight there — a further cheap layer
+    // of smoothing against any residual per-frame jitter in that stream.
     this._renderX = null;
     this._renderY = null;
     this._renderAngle = null;
@@ -111,6 +122,10 @@ export default class NetFighter {
 
     this.container.setPosition(this._renderX, this._renderY);
     this.container.setRotation(this._renderAngle);
+    // Counter-rotate the text labels so they stay upright/readable instead
+    // of spinning with the container's facing angle.
+    this.nicknameLabel.setRotation(-this._renderAngle);
+    this.stateLabel.setRotation(-this._renderAngle);
     this.shadow.setPosition(this._renderX, this._renderY + PLAYER.RADIUS * 0.8);
     this.shadow.setAlpha(isAlive ? 1 : 0);
     this.container.setAlpha(isAlive ? 1 : 0);

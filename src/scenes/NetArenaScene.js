@@ -26,9 +26,20 @@ import NetFighter from "../net/NetFighter.js";
 import Sfx from "../audio/Sfx.js";
 import TouchControls from "../input/TouchControls.js";
 
-// 4-player FFA: one color per seat (assigned by join order via
-// PlayerState.colorIndex — see server/rooms/ArenaRoom.js onJoin()).
-const PLAYER_COLORS = [0x4fd1ff, 0xff8a5c, 0x8aff6b, 0xd88aff];
+// Color swatch palette — the player picks one in the lobby, synced as
+// PlayerState.colorIndex (validated server-side, see ArenaRoom's
+// sanitizeColorIndex/COLOR_COUNT). Not tied to join order anymore.
+const PLAYER_COLORS = [0x4fd1ff, 0xff8a5c, 0x8aff6b, 0xd88aff, 0xff5c5c, 0xffe066];
+
+// Renders players slightly in the past, interpolating between two buffered
+// server snapshots instead of chasing whatever the latest one happens to be
+// (see _getInterpolatedSnapshot). The server only broadcasts state ~30x/sec
+// (ArenaRoom's patchRate); without this buffer, a late patch under real
+// network jitter freezes the render target until the next one arrives,
+// which is what reads as stutter/pushing next to single-player's every-
+// frame physics. ~2 patch intervals of buffer is enough to always have two
+// real samples to interpolate between even when a patch is a bit late.
+const RENDER_DELAY_MS = 100;
 
 export default class NetArenaScene extends Phaser.Scene {
   constructor() {
@@ -36,17 +47,17 @@ export default class NetArenaScene extends Phaser.Scene {
   }
 
   preload() {
-    this.load.audio("qCharging", "q_charging.wav");
-    this.load.audio("qActive", "q_active.mp3");
-    this.load.audio("kick", "kicksound.mp3");
-    this.load.audio("kill", "kill.mp3");
-    this.load.audio("shieldOn", "shield_on.mp3");
-    this.load.audio("parry", "parry.mp3");
-    this.load.audio("wSuccess", "Wsucces.mp3");
+    this.load.audio("qCharging", "assets/audio/q_charging.wav");
+    this.load.audio("qActive", "assets/audio/q_active.mp3");
+    this.load.audio("kick", "assets/audio/kicksound.mp3");
+    this.load.audio("kill", "assets/audio/kill.mp3");
+    this.load.audio("shieldOn", "assets/audio/shield_on.mp3");
+    this.load.audio("parry", "assets/audio/parry.mp3");
+    this.load.audio("wSuccess", "assets/audio/Wsucces.mp3");
 
-    this.load.image("arenaVoid", "arena_void.png");
-    this.load.image("arenaTile", "arena_tile.png");
-    this.load.image("arenaObs", "arena_obs.png");
+    this.load.image("arenaVoid", "assets/images/arena_void.png");
+    this.load.image("arenaTile", "assets/images/arena_tile.png");
+    this.load.image("arenaObs", "assets/images/arena_obs.png");
   }
 
   create() {
@@ -96,17 +107,43 @@ export default class NetArenaScene extends Phaser.Scene {
     this.input.once("pointerdown", unlockAudio);
     this.input.keyboard.once("keydown", unlockAudio);
 
-    const titleScreen = document.getElementById("titleScreen");
+    this.titleScreenEl = document.getElementById("titleScreen");
+    this.lobbyScreenEl = document.getElementById("lobbyScreen");
+    this.lobbyRoomListEl = document.getElementById("lobbyRoomList");
+    this.lobbyErrorEl = document.getElementById("lobbyError");
+    this.lobbyNameInputEl = document.getElementById("lobbyNameInput");
+    this._lobbyRefreshTimer = null;
+
+    // Player profile (nickname + color swatch), persisted across visits so
+    // returning players don't have to re-pick every time. Sent as join
+    // options (see _quickMatch/_createRoom/_joinRoom) — the server validates
+    // and stores both on PlayerState (ArenaRoom.onJoin()).
+    this.lobbyNickInputEl = document.getElementById("lobbyNickInput");
+    this.lobbyColorRowEl = document.getElementById("lobbyColorRow");
+    this.myNickname = localStorage.getItem("itsen_nickname") || "";
+    this.myColorIndex = Number(localStorage.getItem("itsen_colorIndex"));
+    if (!Number.isInteger(this.myColorIndex) || this.myColorIndex < 0 || this.myColorIndex >= PLAYER_COLORS.length) {
+      this.myColorIndex = 0;
+    }
+    this.lobbyNickInputEl.value = this.myNickname;
+    this.lobbyNickInputEl.oninput = () => {
+      this.myNickname = this.lobbyNickInputEl.value;
+      localStorage.setItem("itsen_nickname", this.myNickname);
+    };
+    this._renderColorSwatches();
+
     document.getElementById("startBtn").onclick = () => {
-      titleScreen.classList.add("hidden");
       unlockAudio();
-      this._connect({ spectate: false });
+      this.titleScreenEl.classList.add("hidden");
+      this._openLobby();
     };
-    document.getElementById("spectateBtn").onclick = () => {
-      titleScreen.classList.add("hidden");
-      unlockAudio();
-      this._connect({ spectate: true });
+    document.getElementById("lobbyBackBtn").onclick = () => {
+      this._closeLobby();
+      this.titleScreenEl.classList.remove("hidden");
     };
+    document.getElementById("lobbyRefreshBtn").onclick = () => this._refreshRoomList();
+    document.getElementById("lobbyQuickBtn").onclick = () => this._quickMatch();
+    document.getElementById("lobbyCreateBtn").onclick = () => this._createRoom();
     document.getElementById("leaveBtn").onclick = () => this._leaveMatch();
 
     this.input.on("pointerdown", (p) => {
@@ -664,20 +701,143 @@ export default class NetArenaScene extends Phaser.Scene {
 
   // ---- Networking --------------------------------------------------
 
-  async _connect(options = {}) {
-    // Local dev default: same host as the static page, port 2567 (see
-    // nocache_server.py + server/index.js). A real deployment usually puts
-    // the Colyseus server on its own host/port (or behind a path on the
-    // same domain) — override by setting window.ARENA_SERVER_URL in
-    // net.html rather than editing this file.
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const serverUrl = window.ARENA_SERVER_URL || `${proto}://${location.hostname}:2567`;
-    this._client = new Colyseus.Client(serverUrl);
+  // Local dev default: same host as the static page, port 2567 (see
+  // nocache_server.py + server/index.js). A real deployment usually puts
+  // the Colyseus server on its own host/port (or behind a path on the
+  // same domain) — override by setting window.ARENA_SERVER_URL in net.html
+  // rather than editing this file. Shared by the lobby's room-list fetch
+  // and every join/create path below, so the client only gets created once.
+  _ensureClient() {
+    if (!this._client) {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const serverUrl = window.ARENA_SERVER_URL || `${proto}://${location.hostname}:2567`;
+      this._client = new Colyseus.Client(serverUrl);
+      // The vendored colyseus.js build (0.16.x) predates the official SDK's
+      // getAvailableRooms() helper, so the lobby's room list is fetched from
+      // the server's own plain "/rooms" JSON endpoint (see server/index.js)
+      // instead — same ws(s):// URL, just swapped to http(s)://.
+      this._serverHttpUrl = serverUrl.replace(/^ws/, "http");
+    }
+    return this._client;
+  }
+
+  // ---- Lobby (room list / create / join) --------------------------
+
+  _openLobby() {
+    this.lobbyScreenEl.classList.remove("hidden");
+    this._refreshRoomList();
+    // Rooms fill up / new ones appear while someone's just sitting on the
+    // list — poll rather than requiring a manual refresh every time.
+    this._lobbyRefreshTimer = setInterval(() => this._refreshRoomList(), 3000);
+  }
+
+  _closeLobby() {
+    this.lobbyScreenEl.classList.add("hidden");
+    if (this._lobbyRefreshTimer) {
+      clearInterval(this._lobbyRefreshTimer);
+      this._lobbyRefreshTimer = null;
+    }
+  }
+
+  async _refreshRoomList() {
+    this._ensureClient();
     try {
-      const room = await this._client.joinOrCreate("arena", options);
+      const res = await fetch(`${this._serverHttpUrl}/rooms`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const rooms = await res.json();
+      this.lobbyErrorEl.textContent = "";
+      this._renderRoomList(rooms);
+    } catch (err) {
+      this.lobbyErrorEl.textContent = `방 목록을 불러오지 못했습니다: ${err.message || err}`;
+    }
+  }
+
+  _renderRoomList(rooms) {
+    if (!rooms.length) {
+      this.lobbyRoomListEl.innerHTML = '<div class="empty">열린 방이 없습니다. 새로 만들어보세요!</div>';
+      return;
+    }
+    this.lobbyRoomListEl.innerHTML = "";
+    for (const room of rooms) {
+      const meta = room.metadata || {};
+      const name = meta.name || "이름없는 방";
+      const mode = meta.mode === "round" ? "ROUND" : "DEATHMATCH";
+      const playerCount = meta.playerCount ?? 0;
+      const maxPlayers = meta.maxPlayers ?? 4;
+      const spectatorCount = meta.spectatorCount ?? 0;
+      const full = playerCount >= maxPlayers;
+
+      const row = document.createElement("div");
+      row.className = "lobby-room-row";
+      row.innerHTML =
+        `<div class="info">` +
+        `<span class="name">${this._escapeHtml(name)}</span>` +
+        `<span class="meta">${mode} · 플레이어 ${playerCount}/${maxPlayers}` +
+        `${spectatorCount > 0 ? ` · 관전 ${spectatorCount}` : ""}</span>` +
+        `</div>` +
+        `<div class="actions">` +
+        `<button class="joinBtn primary" ${full ? "disabled" : ""}>${full ? "가득 참" : "입장"}</button>` +
+        `<button class="spectateBtn">관전</button>` +
+        `</div>`;
+      row.querySelector(".joinBtn").onclick = () => this._joinRoom(room.roomId, false);
+      row.querySelector(".spectateBtn").onclick = () => this._joinRoom(room.roomId, true);
+      this.lobbyRoomListEl.appendChild(row);
+    }
+  }
+
+  _renderColorSwatches() {
+    this.lobbyColorRowEl.innerHTML = "";
+    PLAYER_COLORS.forEach((color, i) => {
+      const btn = document.createElement("button");
+      btn.className = "color-swatch" + (i === this.myColorIndex ? " selected" : "");
+      btn.style.background = `#${color.toString(16).padStart(6, "0")}`;
+      btn.onclick = () => {
+        this.myColorIndex = i;
+        localStorage.setItem("itsen_colorIndex", String(i));
+        this._renderColorSwatches();
+      };
+      this.lobbyColorRowEl.appendChild(btn);
+    });
+  }
+
+  _joinOptions(extra) {
+    return { nickname: this.myNickname, colorIndex: this.myColorIndex, ...extra };
+  }
+
+  _escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  async _quickMatch() {
+    try {
+      const room = await this._ensureClient().joinOrCreate("arena", this._joinOptions({ spectate: false }));
+      this._closeLobby();
       this._wireRoom(room);
     } catch (err) {
-      this.connectionError = `연결 실패: ${err.message || err}`;
+      this.lobbyErrorEl.textContent = `입장 실패: ${err.message || err}`;
+    }
+  }
+
+  async _createRoom() {
+    try {
+      const name = this.lobbyNameInputEl.value.trim();
+      const room = await this._ensureClient().create("arena", this._joinOptions(name ? { name } : {}));
+      this._closeLobby();
+      this._wireRoom(room);
+    } catch (err) {
+      this.lobbyErrorEl.textContent = `방 생성 실패: ${err.message || err}`;
+    }
+  }
+
+  async _joinRoom(roomId, spectate) {
+    try {
+      const room = await this._ensureClient().joinById(roomId, this._joinOptions({ spectate }));
+      this._closeLobby();
+      this._wireRoom(room);
+    } catch (err) {
+      this.lobbyErrorEl.textContent = `입장 실패: ${err.message || err}`;
     }
   }
 
@@ -699,12 +859,13 @@ export default class NetArenaScene extends Phaser.Scene {
     for (const fighter of this.fighters.values()) fighter.destroy();
     this.fighters.clear();
     this._latestSnapshots = new Map();
+    this._snapshotBuffers = new Map();
     this._prevSnap.clear();
     this._kickHitFlags.clear();
     this.cameras.main.stopFollow();
     this.cameras.main.setZoom(1);
     document.body.classList.remove("spectating");
-    document.getElementById("titleScreen").classList.remove("hidden");
+    this._openLobby();
   }
 
   // Attaches schema/lifecycle callbacks to a (re)connected room. Shared by
@@ -737,15 +898,21 @@ export default class NetArenaScene extends Phaser.Scene {
     // first state snapshot), so registering callbacks before this map is
     // created threw inside Colyseus's internal callback dispatch.
     this._latestSnapshots = new Map();
+    this._snapshotBuffers = new Map(); // sessionId -> [{t, x, y, angle, chargeTime, stunTimer, state, isAlive, score}, ...]
     this._prevSnap.clear();
     this._kickHitFlags.clear();
 
     const $ = Colyseus.getStateCallbacks(room);
     $(room.state).players.onAdd((player, sessionId) => {
-      const fighter = new NetFighter(this, PLAYER_COLORS[player.colorIndex % PLAYER_COLORS.length]);
+      const fighter = new NetFighter(this, PLAYER_COLORS[player.colorIndex % PLAYER_COLORS.length], player.nickname);
       this.fighters.set(sessionId, fighter);
       this._latestSnapshots.set(sessionId, { ...player });
-      $(player).onChange(() => this._latestSnapshots.set(sessionId, { ...player }));
+      this._snapshotBuffers.set(sessionId, []);
+      this._pushSnapshot(sessionId, player);
+      $(player).onChange(() => {
+        this._latestSnapshots.set(sessionId, { ...player });
+        this._pushSnapshot(sessionId, player);
+      });
 
       if (sessionId === this.mySessionId) {
         // A real PlayerState for our own sessionId means we're an actual
@@ -764,6 +931,7 @@ export default class NetArenaScene extends Phaser.Scene {
       if (fighter) fighter.destroy();
       this.fighters.delete(sessionId);
       this._latestSnapshots.delete(sessionId);
+      this._snapshotBuffers.delete(sessionId);
       this._prevSnap.delete(sessionId);
       this._kickHitFlags.delete(sessionId);
     });
@@ -810,6 +978,64 @@ export default class NetArenaScene extends Phaser.Scene {
     this.connectionError = "재접속에 실패했습니다. 새로고침 해주세요.";
   }
 
+  // Appends a timestamped sample to sessionId's interpolation buffer (see
+  // RENDER_DELAY_MS / _getInterpolatedSnapshot) and trims anything older
+  // than the render window needs — otherwise these would grow for the
+  // entire match.
+  _pushSnapshot(sessionId, player) {
+    const buf = this._snapshotBuffers.get(sessionId);
+    if (!buf) return;
+    const entry = {
+      t: performance.now(),
+      x: player.x,
+      y: player.y,
+      angle: player.angle,
+      chargeTime: player.chargeTime,
+      stunTimer: player.stunTimer,
+      state: player.state,
+      isAlive: player.isAlive,
+      score: player.score,
+    };
+    buf.push(entry);
+    const cutoff = entry.t - 1000;
+    while (buf.length > 2 && buf[0].t < cutoff) buf.shift();
+  }
+
+  // Reconstructs what sessionId's state looked like at renderTime by
+  // interpolating between the two buffered snapshots straddling it (falling
+  // back to the nearest edge sample if renderTime is outside the buffered
+  // range, e.g. right after joining or during a connection hiccup). Position/
+  // angle/charge/stun are numeric-lerped; state/isAlive/score are step
+  // values so they're taken from the earlier of the two samples — a state
+  // transition should appear to happen exactly when its sample says it did,
+  // not partway through.
+  _getInterpolatedSnapshot(sessionId, renderTime) {
+    const buf = this._snapshotBuffers.get(sessionId);
+    if (!buf || buf.length === 0) return null;
+    if (buf.length === 1 || renderTime <= buf[0].t) return buf[0];
+    const last = buf[buf.length - 1];
+    if (renderTime >= last.t) return last;
+
+    for (let i = 0; i < buf.length - 1; i++) {
+      const a = buf[i];
+      const b = buf[i + 1];
+      if (renderTime > b.t) continue;
+      const span = b.t - a.t;
+      const t = span > 0 ? (renderTime - a.t) / span : 1;
+      return {
+        x: Phaser.Math.Linear(a.x, b.x, t),
+        y: Phaser.Math.Linear(a.y, b.y, t),
+        angle: a.angle + Phaser.Math.Angle.Wrap(b.angle - a.angle) * t,
+        chargeTime: Phaser.Math.Linear(a.chargeTime, b.chargeTime, t),
+        stunTimer: Phaser.Math.Linear(a.stunTimer, b.stunTimer, t),
+        state: a.state,
+        isAlive: a.isAlive,
+        score: a.score,
+      };
+    }
+    return last;
+  }
+
   // Obstacles/pits/quicksand are all fixed for the room's whole lifetime
   // (generated once, server-side) — each is built exactly once, the first
   // time its list shows up in room.state, then never touched again.
@@ -846,8 +1072,9 @@ export default class NetArenaScene extends Phaser.Scene {
     if (this.room) this._syncHazardsFromRoom();
 
     if (this._latestSnapshots) {
+      const renderTime = performance.now() - RENDER_DELAY_MS;
       for (const [sessionId, fighter] of this.fighters.entries()) {
-        const snap = this._latestSnapshots.get(sessionId);
+        const snap = this._getInterpolatedSnapshot(sessionId, renderTime);
         if (!snap) continue;
         this._detectFighterEvents(sessionId, snap);
         fighter.sync(snap, delta);
@@ -935,7 +1162,7 @@ export default class NetArenaScene extends Phaser.Scene {
   _playerLabel(sessionId) {
     if (sessionId === this.mySessionId) return "YOU";
     const p = this.room && this.room.state.players && this.room.state.players.get(sessionId);
-    return p ? `P${p.colorIndex + 1}` : "?";
+    return p ? p.nickname || `P${p.colorIndex + 1}` : "?";
   }
 
   // Renders the shared, server-authoritative match state (room.state.mode/
