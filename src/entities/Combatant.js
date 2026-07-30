@@ -155,6 +155,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this.rotation = 0;
     this.figure.setAlpha(1);
     this.shadow.setAlpha(1);
+    this._displayPose = null;
     this.setState(STATES.IDLE);
   }
 
@@ -203,7 +204,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
       this._clock += dtMs;
       this._drawKickCone();
       this._drawAuraRing();
-      this._drawFigure();
+      this._drawFigure(dtMs);
       this.rotation = this.facing;
       this.shadow.setPosition(this.x, this.y + PLAYER.RADIUS * 0.8);
       this.stateLabel.setText(this.state);
@@ -252,7 +253,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this._applyKnockbackMotion(dtMs);
     this._drawKickCone();
     this._drawAuraRing();
-    this._drawFigure();
+    this._drawFigure(dtMs);
     this.rotation = this.facing;
     this.shadow.setPosition(this.x, this.y + PLAYER.RADIUS * 0.8);
     this.stateLabel.setText(
@@ -607,6 +608,8 @@ export default class Combatant extends Phaser.GameObjects.Container {
     let footL = { x: -r * 0.3, y: -r * 0.3 };
     let footR = { x: -r * 0.3, y: r * 0.3 };
     let headX = r * 0.25;
+    let bob = 0; // forward/back torso bounce, only used by the walk cycle
+    let swayRot = 0; // hip-sway rotation, only used by the walk cycle
 
     switch (this.state) {
       case STATES.CHARGING: {
@@ -656,30 +659,66 @@ export default class Combatant extends Phaser.GameObjects.Container {
         footL = { x: -r * 0.35, y: -r * 0.25 };
         footR = { x: -r * 0.35, y: r * 0.25 };
         break;
-      default:
+      default: {
         // IDLE / GCD — alternate the feet fore/aft while actually moving.
+        // Stride cadence follows actual movement speed (slower in a slow
+        // zone) so the legs never appear to slide relative to the ground.
         if (this.wantsMove) {
-          const swing = Math.sin(this._clock * 0.014) * r * 0.42;
+          const speedFactor = this.inSlowZone ? SLOW_ZONE_FACTOR : 1;
+          const phase = this._clock * 0.014 * speedFactor;
+          const swing = Math.sin(phase) * r * 0.42;
           footL = { x: -r * 0.3 + swing, y: -r * 0.3 };
           footR = { x: -r * 0.3 - swing, y: r * 0.3 };
+          // Torso bounces forward twice per stride (once per footfall) and
+          // the hips sway with the same phase as the legs — small amounts,
+          // just enough to read as a gait instead of a gliding pose.
+          bob = Math.abs(Math.sin(phase)) * r * 0.06;
+          swayRot = Math.sin(phase) * 0.05;
         }
         break;
+      }
     }
 
-    return { grip, tip, footL, footR, headX };
+    return { grip, tip, footL, footR, headX, bob, swayRot };
   }
 
-  _drawFigure() {
+  // Smooths the raw per-state target pose toward what's actually drawn each
+  // frame, so switching states (e.g. IDLE walk -> CHARGING) blends the limbs
+  // instead of teleporting them; the states that already animate themselves
+  // via lerp (CHARGING ratio, KICKING elapsed-time) barely notice this on
+  // top since the time constant is short relative to their own durations.
+  _drawFigure(dtMs = 16) {
     const g = this.figure;
     g.clear();
-    if (!this.isAlive) return;
+    if (!this.isAlive) {
+      this._displayPose = null;
+      return;
+    }
 
     const r = PLAYER.RADIUS;
-    const { grip, tip, footL, footR, headX } = this._computePose();
-    const hip = { x: -r * 0.2, y: 0 };
-    const neck = { x: r * 0.05, y: 0 };
+    const target = this._computePose();
+    if (!this._displayPose) this._displayPose = target;
+    const k = 1 - Math.exp(-dtMs / 40);
+    const p = this._displayPose;
+    const lerpPt = (a, b) => ({
+      x: Phaser.Math.Linear(a.x, b.x, k),
+      y: Phaser.Math.Linear(a.y, b.y, k),
+    });
+    p.grip = lerpPt(p.grip, target.grip);
+    p.tip = lerpPt(p.tip, target.tip);
+    p.footL = lerpPt(p.footL, target.footL);
+    p.footR = lerpPt(p.footR, target.footR);
+    p.headX = Phaser.Math.Linear(p.headX, target.headX, k);
+    p.bob = Phaser.Math.Linear(p.bob || 0, target.bob || 0, k);
+    p.swayRot = Phaser.Math.Linear(p.swayRot || 0, target.swayRot || 0, k);
+    const { grip, tip, footL, footR, headX, bob, swayRot } = p;
 
-    g.setRotation(this.state === STATES.STUNNED ? Math.sin(this._clock * 0.02) * 0.12 : 0);
+    const hip = { x: -r * 0.2 + bob, y: 0 };
+    const neck = { x: r * 0.05 + bob, y: 0 };
+
+    g.setRotation(
+      this.state === STATES.STUNNED ? Math.sin(this._clock * 0.02) * 0.12 : swayRot
+    );
 
     g.lineStyle(4, 0xe8e8f0, 0.95);
     g.beginPath();
