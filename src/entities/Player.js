@@ -46,6 +46,7 @@ export default class Player extends Combatant {
     this.qPressed = keyQ || touchQ; // tap edge — used by non-charging Q skills (e.g. Knight's comboDash)
     this.wHeld = this.keys.w.isDown || this.touch.wHeld;
     this.wPressed = keyW || touchW;
+    this.eHeld = this.keys.e.isDown || this.touch.eHeld; // hold-to-charge E skills (e.g. Warrior's divingSlam)
     this.ePressed = keyE || touchE;
 
     super.update(dtMs);

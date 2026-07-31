@@ -37,9 +37,22 @@ class Sfx {
   }
 
   // Plays a loaded clip if present. Returns true if it played, so callers
-  // can fall back to the synthesized version when it didn't.
-  _playClip(key, config) {
+  // can fall back to the synthesized version when it didn't. `trimMs`, if
+  // given, force-stops the clip after that many ms — for source files that
+  // run longer than the skill's own animation window (Phaser's sound config
+  // has no built-in "play only the first N ms" option, so this adds one
+  // manually via a real Sound instance instead of the play() shorthand).
+  _playClip(key, { trimMs, ...config } = {}) {
     if (!this._hasClip(key)) return false;
+    if (trimMs) {
+      const sound = this.scene.sound.add(key, config);
+      sound.play();
+      setTimeout(() => {
+        if (sound.isPlaying) sound.stop();
+        sound.destroy();
+      }, trimMs);
+      return true;
+    }
     this.scene.sound.play(key, config);
     return true;
   }
@@ -132,14 +145,25 @@ class Sfx {
   // progress) rather than a separate asset. Start on CHARGING entry, feed
   // it live progress via chargeLoopUpdate(), self-stops on any exit from
   // CHARGING (see Combatant.setState).
-  chargeLoopStart() {
-    if (this._hasClip("qCharging")) {
-      this._chargeClip = this.scene.sound.add("qCharging", { loop: true, volume: 0.45, rate: 0.7 });
+  // `clipKey` lets a class substitute its own charge clip (e.g. Mage's
+  // magiQCharging) while still sharing this one loop instance/synthesized
+  // fallback — defaults to the original swordsman clip so every existing
+  // call site (swordsman Q, Warrior E) is unaffected.
+  chargeLoopStart(clipKey = "qCharging") {
+    // Sfx is one shared instance across every combatant (Player AND Dummy),
+    // but this loop is tracked in a single field — if a previous charge
+    // (e.g. the Dummy's own practice-dash wind-up) is still playing when
+    // this fires, overwriting that reference without stopping it first
+    // orphans the old Sound/oscillator with nothing left able to stop it,
+    // so it just loops forever. Always clear out any previous instance
+    // before starting a new one.
+    this.chargeLoopStop();
+    if (this._hasClip(clipKey)) {
+      this._chargeClip = this.scene.sound.add(clipKey, { loop: true, volume: 0.45, rate: 0.7 });
       this._chargeClip.play();
       return;
     }
     if (!this.ctx) return;
-    this.chargeLoopStop();
     const now = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
     osc.type = "sawtooth";
@@ -336,6 +360,76 @@ class Sfx {
   shieldBash() {
     this._metalSlice({ freqStart: 1600, freqEnd: 500, duration: 0.14, peak: 0.35 });
     this._thump({ freq: 85, duration: 0.16, peak: 0.45, delay: 0.01 });
+  }
+
+  // 19. Warrior Q: instant axe swing — vikingQ clip.
+  axeSwing() {
+    if (this._playClip("vikingQ", { volume: 0.6 })) return;
+    this._noise({ duration: 0.16, peak: 0.4, filterFreq: 1600, filterType: "bandpass" });
+    this._metalSlice({ freqStart: 2400, freqEnd: 700, duration: 0.14, peak: 0.35, delay: 0.02 });
+  }
+
+  // 20. Warrior W: battle-cry roar/activation — vikingW1 clip.
+  battleCryShout() {
+    if (this._playClip("vikingW1", { volume: 0.6 })) return;
+    this._tone({ freqStart: 220, freqEnd: 90, duration: 0.4, type: "sawtooth", peak: 0.25 });
+    this._noise({ duration: 0.3, peak: 0.3, filterFreq: 900, filterType: "bandpass" });
+  }
+
+  // 20b. Warrior W: played once per target actually hit by the AOE shout —
+  // vikingW2 clip. (Best-guess mapping — W1/W2 could equally be a two-layer
+  // single stinger; flagged for correction after hearing it in-game.)
+  battleCryDebuffHit() {
+    if (this._playClip("vikingW2", { volume: 0.55 })) return;
+    this._tone({ freqStart: 900, freqEnd: 300, duration: 0.2, type: "square", peak: 0.18 });
+  }
+
+  // 21. Warrior E: leap-off — vikingE1 clip.
+  slamLeap() {
+    if (this._playClip("vikingE1", { volume: 0.6 })) return;
+    this._noise({ duration: 0.18, peak: 0.35, filterFreq: 2200, filterType: "highpass" });
+  }
+
+  // 22. Warrior E: landing impact — vikingEImpact clip.
+  slamImpact() {
+    if (this._playClip("vikingEImpact", { volume: 0.65 })) return;
+    this._thump({ freq: 55, duration: 0.3, peak: 0.6 });
+    this._noise({ duration: 0.25, peak: 0.4, filterFreq: 400, filterType: "lowpass", delay: 0.02 });
+  }
+
+  // 24. Mage Q: beam release — magiQ clip, trimmed to the beam's own active
+  // window (source file runs well past the skill's animation length).
+  laserFire() {
+    if (this._playClip("magiQ", { volume: 0.65, trimMs: 350 })) return;
+    this._metalSlice({ freqStart: 3400, freqEnd: 1800, duration: 0.16, peak: 0.4 });
+    this._noise({ duration: 0.2, peak: 0.35, filterFreq: 2600, filterType: "highpass", delay: 0.01 });
+  }
+
+  // 25. Mage W: fluidize activation — magiW clip, trimmed to the
+  // invincibility window it announces.
+  fluidStateStart() {
+    if (this._playClip("magiW", { volume: 0.55, trimMs: 500 })) return;
+    this._tone({ freqStart: 500, freqEnd: 1400, duration: 0.3, type: "sine", peak: 0.22 });
+    this._noise({ duration: 0.25, peak: 0.2, filterFreq: 3000, filterType: "highpass", delay: 0.02 });
+  }
+
+  // 26. Mage E: blizzard cast — magiE clip. Only the 4s-5s segment of the
+  // source file is usable for this (the rest doesn't fit the skill), so
+  // seek in and trim right back out.
+  blizzardCast() {
+    if (this._playClip("magiE", { volume: 0.6, seek: 4, trimMs: 1000 })) return;
+    this._noise({ duration: 0.25, peak: 0.35, filterFreq: 3200, filterType: "highpass" });
+    this._tone({ freqStart: 1800, freqEnd: 900, duration: 0.2, type: "sine", peak: 0.15, delay: 0.03 });
+  }
+
+  // 26b. Mage E: played when the blizzard freezes a PARRYING/fluid target
+  // instead of just slowing them — magiEFrozen clip. (Best-guess mapping,
+  // same caveat as Warrior's W1/W2 split — flagged for correction after
+  // hearing it in-game.)
+  blizzardFreeze() {
+    if (this._playClip("magiEFrozen", { volume: 0.6, trimMs: 400 })) return;
+    this._tone({ freqStart: 1400, freqEnd: 300, duration: 0.3, type: "triangle", peak: 0.2 });
+    this._noise({ duration: 0.2, peak: 0.2, filterFreq: 2000, filterType: "highpass", delay: 0.02 });
   }
 
   // 10. Quicksand appearing: a wet shifting-ground rumble as the patch forms.

@@ -9,6 +9,7 @@ export default class TouchControls {
     this.joystick = { active: false, angle: 0, magnitude: 0 };
     this.qHeld = false;
     this.wHeld = false;
+    this.eHeld = false;
     this._qTap = false;
     this._wTap = false;
     this._eTap = false;
@@ -32,7 +33,15 @@ export default class TouchControls {
         this.wHeld = false;
       },
     });
-    this._setupButton("btnE", { onDown: () => (this._eTap = true) });
+    this._setupButton("btnE", {
+      onDown: () => {
+        this._eTap = true;
+        this.eHeld = true;
+      },
+      onUp: () => {
+        this.eHeld = false;
+      },
+    });
   }
 
   consumeQTap() {

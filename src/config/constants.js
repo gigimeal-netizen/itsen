@@ -57,6 +57,7 @@ export const QUICKSAND = {
 };
 
 export const SLOW_ZONE_FACTOR = 0.3; // quicksand: -70% movement speed while inside
+export const SLOW_DEBUFF_FACTOR = 0.5; // Mage's blizzard (E): -50% movement speed while slowed
 
 export const RESPAWN_DELAY_MS = 1500;
 
@@ -112,10 +113,11 @@ export const CLASSES = {
     // of classId strings — see the "knight" entry below for the first class
     // with different shapes.
     skillTypes: { q: "chargeDash", w: "tapParry", e: "kickCone" },
-    // Per-class look, independent of skillTypes — headShape lets each class
-    // read as visually distinct at a glance (see Combatant._drawFigure).
-    // "circle" is the default/original look.
-    visual: { headShape: "circle" },
+    // Per-class look, independent of skillTypes — headShape/weaponStyle let
+    // each class read as visually distinct at a glance (see
+    // Combatant._drawFigure/_computePose). "circle"/"blade" is the
+    // default/original look.
+    visual: { headShape: "circle", weaponStyle: "blade" },
     qDash: {
       MAX_CHARGE_MS: 1200, // charge cap
       MIN_DISTANCE: 140,
@@ -144,7 +146,7 @@ export const CLASSES = {
   knight: {
     id: "knight",
     skillTypes: { q: "comboDash", w: "heldGuard", e: "shieldCharge" },
-    visual: { headShape: "square" }, // reads as a helmet, distinct from swordsman's bare head
+    visual: { headShape: "square", weaponStyle: "hammer" }, // reads as a helmet, distinct from swordsman's bare head
     qDash: {
       // No hold-to-charge — a single tap fires a fixed-distance dash (see
       // Combatant._startComboDash). Unlike the swordsman's Q, this one is
@@ -197,6 +199,98 @@ export const CLASSES = {
       DURATION_MS: 6000, // expires silently if unused — no infinite banking
     },
   },
+  // Stage 2b (single-player only): 전사/Warrior. Q is an instant 360-degree
+  // swing around self (no travel, instakill); W is a 0.5s self-invincibility
+  // window plus a one-shot AOE "shout" that disables Q/W/E (not movement) on
+  // anyone it hits for 1s; E is a hold-to-charge diving slam — longer charge
+  // means a further leap and a larger landing-impact radius, and unlike
+  // every other class's W-interaction so far, hitting a guarding target just
+  // stuns them instead of countering the attacker.
+  warrior: {
+    id: "warrior",
+    skillTypes: { q: "axeSwing", w: "battleCry", e: "divingSlam" },
+    visual: { headShape: "horned", weaponStyle: "axes" },
+    axeSwing: {
+      RADIUS: 45, // 360-degree hit radius around self, no angle check (halved from 90)
+      ACTIVE_MS: 90,
+      TOTAL_MS: 260,
+    },
+    battleCry: {
+      DURATION_MS: 500, // self-invincibility window (see Combatant.isInvincible) — first phase
+      DISABLE_DELAY_MS: 1000, // gap AFTER invincibility ends before the AOE shout fires
+      SHOUT_RADIUS: 40, // AOE debuff radius, checked once at activation (down to 25% of 160)
+      DISABLE_MS: 1000, // how long an affected target can't use Q/W/E
+      ACTIVE_MS: 60, // shout burst window — unlike every other class's is<X>Active
+      // pattern this window sits at the END of TOTAL_MS, not the start (see
+      // Combatant.isBattleCryShoutActive)
+      TOTAL_MS: 1500, // DURATION_MS + DISABLE_DELAY_MS
+    },
+    divingSlam: {
+      MAX_CHARGE_MS: 1100,
+      MIN_LEAP_DISTANCE: 0, // a quick tap-release barely accumulates chargeTime, so this
+      // reads as an in-place slam instead of a guaranteed minimum hop
+      MAX_LEAP_DISTANCE: 380,
+      MIN_IMPACT_RADIUS: 35, // halved from 70
+      MAX_IMPACT_RADIUS: 75, // halved from 150
+      LEAP_SPEED: 1400,
+      KNOCKBACK_DISTANCE: 140,
+      KNOCKBACK_SPEED: 1100,
+      // landing on a PARRYING target: stuns them instead of a counter — the
+      // attacker is NOT punished here, unlike every other W-interaction.
+      VS_GUARD_STUN_MS: STUN_DURATION_MS,
+      ACTIVE_MS: 90,
+      TOTAL_MS: 280, // SLAM_IMPACT window, after the leap lands
+    },
+  },
+  // Stage 2c (single-player only): 법사/Mage. Q is a hold-to-charge laser —
+  // it must be held past MIN_CHARGE_MS before release does anything at all
+  // (an early release is just cancelled, no beam); holding longer than that
+  // keeps growing length/width up to MAX_CHARGE_MS. W is "fluidization": 0.5s
+  // of unconditional invincibility (immune to all Q, same isInvincible guard
+  // as Warrior's battle cry) followed immediately by a 1s move-speed haste
+  // window. E is a wide instant 180-degree cone that slows a plain hit for a
+  // second; like every other class's E, it beats W outright — hitting a
+  // PARRYING *or* currently-fluid target freezes (stuns) them instead of
+  // just slowing, "failing" their W the same way Warrior's battle cry fails
+  // against a landed E.
+  mage: {
+    id: "mage",
+    skillTypes: { q: "laserBeam", w: "fluidState", e: "blizzard" },
+    visual: { headShape: "cone", weaponStyle: "staff" }, // pointed wizard hat, two-handed staff
+    laserBeam: {
+      MIN_CHARGE_MS: 1400, // release before this does nothing — must "complete" to fire (+1s)
+      MAX_CHARGE_MS: 2400, // holding beyond MIN keeps scaling length/width up to this cap (+1s, same 1000ms scaling window)
+      MIN_LENGTH: 260,
+      MAX_LENGTH: 620,
+      MIN_WIDTH: 18,
+      MAX_WIDTH: 46,
+      ACTIVE_MS: 140, // beam hit window
+      TOTAL_MS: 220, // total animation lock before GCD
+    },
+    fluidState: {
+      DURATION_MS: 500, // self-invincibility window (see Combatant.isInvincible)
+      HASTE_MS: 1000, // move-speed buff window, right after invincibility ends
+      HASTE_MULTIPLIER: 1.6, // +60% move speed while hasted — untested guess, tune after playtest
+      TOTAL_MS: 1500, // DURATION_MS + HASTE_MS
+    },
+    blizzard: {
+      RANGE: 60, // down to 25% of 240
+      HALF_ANGLE_DEG: 90, // total cone = 180 deg
+      SLOW_MS: 1000, // plain-hit debuff duration (see Combatant._moveSpeed)
+      VS_GUARD_STUN_MS: STUN_DURATION_MS, // freezing a PARRYING or fluid (W-active) target
+      ACTIVE_MS: 110,
+      TOTAL_MS: 260,
+    },
+    // Reward for landing either defensive/control skill: a successful W
+    // block (an attacker punished by fluid invincibility) or a successful E
+    // freeze (landing blizzard on a PARRYING/fluid target) grants this —
+    // Q's charge-completion threshold drops to CHARGE_MS until it's used or
+    // the buff expires. See Combatant._grantFastCharge/laserMinChargeMs.
+    fastCharge: {
+      DURATION_MS: 6000, // expires silently if unused — no infinite banking (same as Knight's empoweredQBuff)
+      CHARGE_MS: 100, // Q's charge-completion threshold while this buff is active
+    },
+  },
 };
 export const DEFAULT_CLASS_ID = "swordsman";
 export function classSkills(classId) {
@@ -221,4 +315,15 @@ export const STATES = {
   COMBO_WINDOW: "COMBO_WINDOW", // waiting for a Q/W/E follow-up after a landed Knight Q hit
   COMBO_ATTACK: "COMBO_ATTACK", // the follow-up hammer swing itself
   EMPOWERED_STRIKE: "EMPOWERED_STRIKE", // Knight's empowered Q — stationary wide line-AOE, not a dash
+  // Stage 2b (Warrior, single-player only) additions:
+  AXE_SWING: "AXE_SWING", // Warrior's Q — instant 360-degree hit around self
+  BATTLE_CRY: "BATTLE_CRY", // Warrior's W — self-invincibility + one-shot AOE debuff
+  SLAM_CHARGE: "SLAM_CHARGE", // Warrior's E, hold phase
+  SLAMMING: "SLAMMING", // Warrior's E, leap travel
+  SLAM_IMPACT: "SLAM_IMPACT", // Warrior's E, landing hit-test window
+  // Stage 2c (Mage, single-player only) additions:
+  LASER_CHARGE: "LASER_CHARGE", // Mage's Q, hold phase — must reach MIN_CHARGE_MS to fire
+  LASER_FIRE: "LASER_FIRE", // Mage's Q, the beam hit-test window
+  FLUID: "FLUID", // Mage's W — invincible phase, then a move-speed haste phase
+  BLIZZARD: "BLIZZARD", // Mage's E — instant 180-degree cone
 };

@@ -36,6 +36,22 @@ export default class ArenaScene extends Phaser.Scene {
     this.load.audio("knightE", "assets/audio/knight_E.mp3");
     this.load.audio("knightW", "assets/audio/knight_W.mp3");
 
+    // Warrior (전사) — see Sfx.js's axeSwing/battleCryShout/battleCryDebuffHit/
+    // slamLeap/slamImpact.
+    this.load.audio("vikingQ", "assets/audio/viking_Q.mp3");
+    this.load.audio("vikingW1", "assets/audio/viking_W1.mp3");
+    this.load.audio("vikingW2", "assets/audio/viking_W2.mp3");
+    this.load.audio("vikingE1", "assets/audio/viking_E1.mp3");
+    this.load.audio("vikingEImpact", "assets/audio/viking_E_impact.mp3");
+
+    // Mage (법사) — see Sfx.js's laserFire/fluidStateStart/blizzardCast/
+    // blizzardFreeze (charge loop reuses magiQCharging via chargeLoopStart).
+    this.load.audio("magiQ", "assets/audio/magi_Q.mp3");
+    this.load.audio("magiQCharging", "assets/audio/magi_Q_charging.mp3");
+    this.load.audio("magiW", "assets/audio/magi_W.mp3");
+    this.load.audio("magiE", "assets/audio/magi_E.mp3");
+    this.load.audio("magiEFrozen", "assets/audio/magi_E_frozen.mp3");
+
     this.load.image("arenaVoid", "assets/images/arena_void.png");
     this.load.image("arenaTile", "assets/images/arena_tile.png");
     this.load.image("arenaObs", "assets/images/arena_obs.png");
@@ -104,10 +120,16 @@ export default class ArenaScene extends Phaser.Scene {
 
     this.classSwordsmanBtn = document.getElementById("classSwordsmanBtn");
     this.classKnightBtn = document.getElementById("classKnightBtn");
+    this.classWarriorBtn = document.getElementById("classWarriorBtn");
+    this.classMageBtn = document.getElementById("classMageBtn");
     this.classSwordsmanBtn.onclick = () => this._selectClass("swordsman");
     this.classKnightBtn.onclick = () => this._selectClass("knight");
+    this.classWarriorBtn.onclick = () => this._selectClass("warrior");
+    this.classMageBtn.onclick = () => this._selectClass("mage");
     this.classSwordsmanBtn.classList.toggle("active", this.selectedClassId === "swordsman");
     this.classKnightBtn.classList.toggle("active", this.selectedClassId === "knight");
+    this.classWarriorBtn.classList.toggle("active", this.selectedClassId === "warrior");
+    this.classMageBtn.classList.toggle("active", this.selectedClassId === "mage");
 
     const titleScreen = document.getElementById("titleScreen");
     document.getElementById("startBtn").onclick = () => {
@@ -127,6 +149,8 @@ export default class ArenaScene extends Phaser.Scene {
     this.selectedClassId = classId;
     this.classSwordsmanBtn.classList.toggle("active", classId === "swordsman");
     this.classKnightBtn.classList.toggle("active", classId === "knight");
+    this.classWarriorBtn.classList.toggle("active", classId === "warrior");
+    this.classMageBtn.classList.toggle("active", classId === "mage");
 
     const wasLocked = this.player.locked;
     this.player.destroyEntity();
@@ -488,6 +512,11 @@ export default class ArenaScene extends Phaser.Scene {
     if (!a.isAlive || !b.isAlive) return false;
     if (a.state === STATES.DASH || b.state === STATES.DASH) return false;
     if (a.state === STATES.SHIELD_CHARGE || b.state === STATES.SHIELD_CHARGE) return false;
+    if (a.state === STATES.SLAMMING || b.state === STATES.SLAMMING) return false;
+    // A fluid Mage is meant to read as insubstantial for their whole cast
+    // (invincible phase and haste phase alike), not just immune to Q hits —
+    // walking through the other body while "liquid" fits the theme.
+    if (a.state === STATES.FLUID || b.state === STATES.FLUID) return false;
     return true;
   }
 
@@ -546,6 +575,11 @@ export default class ArenaScene extends Phaser.Scene {
     this._checkComboAttack();
     this._checkShieldCharge();
     this._checkEmpoweredStrike();
+    this._checkAxeSwing();
+    this._checkBattleCryShout();
+    this._checkSlamImpact();
+    this._checkLaserFire();
+    this._checkBlizzard();
     this._checkHazardDeaths();
 
     if (this.mode === "round") this._checkRoundEnd();
@@ -646,11 +680,17 @@ export default class ArenaScene extends Phaser.Scene {
             this.hitstopMs = 70;
           }
         } else if (dasher._dash.lethal) {
-          other.kill(dasher.facing);
-          dasher.markDashKill();
-          this.hitstopMs = 90;
+          // kill() no-ops (returns false) against an invincible target
+          // (e.g. a Warrior mid-battle-cry) and stuns the dasher instead —
+          // only grant the kill-GCD-exemption/impact feedback if it landed.
+          if (other.kill(dasher.facing, dasher)) {
+            dasher.markDashKill();
+            this.hitstopMs = 90;
+          }
         } else {
-          other.applyKnockback(dasher.facing, dasher._dash.knockbackDistance, dasher._dash.knockbackSpeed);
+          other.applyKnockback(dasher.facing, dasher._dash.knockbackDistance, dasher._dash.knockbackSpeed, {
+            attacker: dasher,
+          });
           this._spawnImpactBurst(other.x, other.y, 0xff9f43, { ringR: 28, bits: 5, dist: 26 });
           this.hitstopMs = 55;
           if (!dasher._dash.pierce) dasher._dash.remaining = 0; // stop right at the hit
@@ -674,12 +714,22 @@ export default class ArenaScene extends Phaser.Scene {
 
         // Only kicking through a parry (E beating W) stuns; a plain hit on
         // anyone else is knockback-only per the requested balance change.
+        // E beats invincibility too (battle cry doesn't answer a kick any
+        // more than a parry does) — bypassInvincible so it always connects,
+        // and hitting an invincible target stuns them same as a countered
+        // parry ("failing" their battle cry), checked before any state
+        // mutation below can flip isInvincible off.
         const counteredParry = target.state === STATES.PARRYING;
-        if (counteredParry) target.applyStun(eKick.STUN_MS);
-        target.applyKnockback(kicker.facing, eKick.KNOCKBACK_DISTANCE, eKick.KNOCKBACK_SPEED);
-        kicker.markKickApplied(counteredParry);
+        const invincibleBroken = target.isInvincible;
+        if (counteredParry || invincibleBroken) {
+          target.applyStun(eKick.STUN_MS, { bypassInvincible: true });
+        }
+        target.applyKnockback(kicker.facing, eKick.KNOCKBACK_DISTANCE, eKick.KNOCKBACK_SPEED, {
+          bypassInvincible: true,
+        });
+        kicker.markKickApplied(counteredParry || invincibleBroken);
 
-        if (counteredParry) {
+        if (counteredParry || invincibleBroken) {
           this._spawnImpactBurst(target.x, target.y, 0xff5c5c, { ringR: 36, bits: 8, dist: 36 });
           this.hitstopMs = 80;
         } else {
@@ -723,10 +773,11 @@ export default class ArenaScene extends Phaser.Scene {
           continue;
         }
 
-        target.kill(attacker.facing);
         attacker.markEmpoweredStrikeApplied();
-        this._spawnImpactBurst(target.x, target.y, 0xffe066, { ringR: 40, bits: 8, dist: 40 });
-        this.hitstopMs = 100;
+        if (target.kill(attacker.facing, attacker)) {
+          this._spawnImpactBurst(target.x, target.y, 0xffe066, { ringR: 40, bits: 8, dist: 40 });
+          this.hitstopMs = 100;
+        }
       }
     }
   }
@@ -758,17 +809,20 @@ export default class ArenaScene extends Phaser.Scene {
           continue;
         }
 
-        target.kill(attacker.facing);
         attacker.markComboHitApplied();
-        this._spawnImpactBurst(target.x, target.y, 0xd98c3a, { ringR: 32, bits: 6, dist: 32 });
-        this.hitstopMs = 90;
+        if (target.kill(attacker.facing, attacker)) {
+          this._spawnImpactBurst(target.x, target.y, 0xd98c3a, { ringR: 32, bits: 6, dist: 32 });
+          this.hitstopMs = 90;
+        }
       }
     }
   }
 
   // Knight shield charge (E) — a short forward dash-charge; hitting a
   // W-active (guarding) target beats it (same triangle edge as E-beats-W
-  // elsewhere) for stronger knockback + a stun, GCD-exempt.
+  // elsewhere) for stronger knockback + a stun, GCD-exempt. Also beats
+  // battle-cry invincibility the same way — E ignores W outright, so a
+  // battle-cry Warrior caught by this gets stunned instead of blocking it.
   _checkShieldCharge() {
     for (const charger of this.combatants) {
       if (charger.state !== STATES.SHIELD_CHARGE || !charger._shieldCharge) continue;
@@ -779,9 +833,12 @@ export default class ArenaScene extends Phaser.Scene {
         if (dist > charger.radius + target.radius) continue;
 
         const vsGuard = target.state === STATES.PARRYING;
-        if (vsGuard) {
-          target.applyStun(cfg.VS_GUARD_STUN_MS);
-          target.applyKnockback(charger.facing, cfg.VS_GUARD_KNOCKBACK_DISTANCE, cfg.VS_GUARD_KNOCKBACK_SPEED);
+        const invincibleBroken = target.isInvincible; // checked before any mutation below
+        if (vsGuard || invincibleBroken) {
+          target.applyStun(cfg.VS_GUARD_STUN_MS, { bypassInvincible: true });
+          target.applyKnockback(charger.facing, cfg.VS_GUARD_KNOCKBACK_DISTANCE, cfg.VS_GUARD_KNOCKBACK_SPEED, {
+            bypassInvincible: true,
+          });
           this._spawnImpactBurst(target.x, target.y, 0xff5c5c, { ringR: 40, bits: 8, dist: 38 });
           this.hitstopMs = 85;
         } else {
@@ -789,9 +846,182 @@ export default class ArenaScene extends Phaser.Scene {
           this._spawnImpactBurst(target.x, target.y, 0x8fa8c8, { ringR: 26, bits: 5, dist: 26 });
           this.hitstopMs = 50;
         }
-        charger.markShieldChargeApplied(vsGuard);
+        charger.markShieldChargeApplied(vsGuard || invincibleBroken);
         charger._shieldCharge.remaining = 0; // stop right at the hit, non-piercing
       }
+    }
+  }
+
+  // Warrior Q: instant 360-degree hit around self — plain circle distance
+  // test, no angle check (simplest correct shape for "everywhere around me").
+  // Still loses to a raised shield, same triangle edge as every other Q.
+  _checkAxeSwing() {
+    for (const attacker of this.combatants) {
+      if (!attacker.isAxeSwingActive) continue;
+      const cfg = attacker.skills.axeSwing;
+      for (const target of this.combatants) {
+        if (target === attacker || !target.isAlive) continue;
+        const dist = Phaser.Math.Distance.Between(attacker.x, attacker.y, target.x, target.y);
+        if (dist > cfg.RADIUS + target.radius) continue;
+
+        if (target.state === STATES.PARRYING) {
+          if (target.parrySuccess()) {
+            attacker.applyStun();
+            this._spawnImpactBurst(target.x, target.y, 0x7ff0ff, { ringR: 42, bits: 8, dist: 42 });
+            this.cameras.main.shake(90, 0.005);
+            this.hitstopMs = 70;
+          }
+          attacker.markAxeSwingApplied();
+          continue;
+        }
+
+        attacker.markAxeSwingApplied();
+        if (target.kill(attacker.facing, attacker)) {
+          this._spawnImpactBurst(target.x, target.y, 0xd9c9a3, { ringR: 34, bits: 6, dist: 32 });
+          this.hitstopMs = 90;
+        }
+      }
+    }
+  }
+
+  // Warrior W: a one-shot AOE debuff burst that fires DISABLE_DELAY_MS after
+  // invincibility ends (not a hit — no damage, so it's unaffected by the
+  // invincibility guard on kill/applyStun/applyKnockback) — anyone in range
+  // can't start Q/W/E for a bit. A raised shield blocks it outright: a
+  // PARRYING target takes no debuff (parrySuccess(), no punishment to the
+  // attacker — this is a pure block, not a Q-vs-W counter).
+  _checkBattleCryShout() {
+    for (const attacker of this.combatants) {
+      if (!attacker.isBattleCryShoutActive) continue;
+      const cfg = attacker.skills.battleCry;
+      for (const target of this.combatants) {
+        if (target === attacker || !target.isAlive) continue;
+        const dist = Phaser.Math.Distance.Between(attacker.x, attacker.y, target.x, target.y);
+        if (dist > cfg.SHOUT_RADIUS + target.radius) continue;
+
+        if (target.state === STATES.PARRYING) {
+          if (target.parrySuccess()) {
+            this._spawnImpactBurst(target.x, target.y, 0x7ff0ff, { ringR: 30, bits: 5, dist: 28 });
+          }
+          continue;
+        }
+
+        target._skillsDisabledMs = cfg.DISABLE_MS;
+        Sfx.battleCryDebuffHit();
+        this._spawnImpactBurst(target.x, target.y, 0x8a8f99, { ringR: 30, bits: 5, dist: 28 });
+      }
+      attacker.markBattleCryShoutApplied();
+    }
+  }
+
+  // Warrior E, landing: a stationary circle hit-test centered on wherever
+  // the leap actually ended up (attacker.x/y at this point), radius resolved
+  // at release time from the charge ratio. Landing on a PARRYING target just
+  // stuns them instead of a counter — the attacker is NOT punished here,
+  // unlike every other class's W-interaction so far (see the design doc).
+  // Also beats battle-cry invincibility the same way (E ignores W outright):
+  // landing on an invincible target stuns them too, same as the vs-guard case.
+  _checkSlamImpact() {
+    for (const attacker of this.combatants) {
+      if (!attacker.isSlamImpactActive) continue;
+      const cfg = attacker.skills.divingSlam;
+      const radius = attacker._slam ? attacker._slam.impactRadius : cfg.MIN_IMPACT_RADIUS;
+      for (const target of this.combatants) {
+        if (target === attacker || !target.isAlive) continue;
+        const dist = Phaser.Math.Distance.Between(attacker.x, attacker.y, target.x, target.y);
+        if (dist > radius + target.radius) continue;
+
+        const vsGuard = target.state === STATES.PARRYING;
+        const invincibleBroken = target.isInvincible; // checked before any mutation below
+        if (vsGuard || invincibleBroken) {
+          target.applyStun(cfg.VS_GUARD_STUN_MS, { bypassInvincible: true });
+          this._spawnImpactBurst(target.x, target.y, 0x7ff0ff, { ringR: 36, bits: 7, dist: 34 });
+        } else {
+          target.applyKnockback(attacker.facing, cfg.KNOCKBACK_DISTANCE, cfg.KNOCKBACK_SPEED);
+          this._spawnImpactBurst(target.x, target.y, 0x6b5636, { ringR: 40, bits: 8, dist: 38 });
+        }
+        this.hitstopMs = 80;
+        attacker.markSlamImpactApplied();
+      }
+    }
+  }
+
+  // Mage Q: a stationary rectangle hit-test along the attacker's facing
+  // direction — same along/perp projection as _checkEmpoweredStrike, since
+  // this is also a straight-line AOE. Still loses to a raised shield (same
+  // triangle edge as every other Q) and to any invincible target (fluid
+  // Mage), both via kill()'s centralized guard; a clean hit is an instakill.
+  _checkLaserFire() {
+    for (const attacker of this.combatants) {
+      if (!attacker.isLaserFireActive) continue;
+      const cfg = attacker.skills.laserBeam;
+      const length = attacker._laser ? attacker._laser.length : cfg.MIN_LENGTH;
+      const halfW = (attacker._laser ? attacker._laser.width : cfg.MIN_WIDTH) / 2;
+      const cos = Math.cos(attacker.facing);
+      const sin = Math.sin(attacker.facing);
+      for (const target of this.combatants) {
+        if (target === attacker || !target.isAlive) continue;
+        const relX = target.x - attacker.x;
+        const relY = target.y - attacker.y;
+        const along = relX * cos + relY * sin;
+        const perp = -relX * sin + relY * cos;
+        if (along < -target.radius || along > length + target.radius) continue;
+        if (Math.abs(perp) > halfW + target.radius) continue;
+
+        if (target.state === STATES.PARRYING) {
+          if (target.parrySuccess()) {
+            attacker.applyStun();
+            this._spawnImpactBurst(target.x, target.y, 0x7ff0ff, { ringR: 42, bits: 8, dist: 42 });
+            this.cameras.main.shake(90, 0.005);
+            this.hitstopMs = 70;
+          }
+          attacker.markLaserFireApplied();
+          continue;
+        }
+
+        attacker.markLaserFireApplied();
+        if (target.kill(attacker.facing, attacker)) {
+          this._spawnImpactBurst(target.x, target.y, 0xd9bfff, { ringR: 38, bits: 8, dist: 38 });
+          this.hitstopMs = 100;
+        }
+      }
+    }
+  }
+
+  // Mage E: a wide instant 180-degree cone (RANGE/HALF_ANGLE_DEG, same shape
+  // as _checkKicks) fired once per activation. A plain hit slows the target
+  // for a second; like every other class's E, it beats W outright — landing
+  // on a PARRYING *or* currently-fluid target freezes (stuns) them instead,
+  // "failing" their W the same way E beats Warrior's battle cry.
+  _checkBlizzard() {
+    for (const attacker of this.combatants) {
+      if (!attacker.isBlizzardActive) continue;
+      const cfg = attacker.skills.blizzard;
+      const halfAngle = Phaser.Math.DegToRad(cfg.HALF_ANGLE_DEG);
+      let counteredGuard = false; // froze at least one PARRYING/fluid target -> skip GCD
+      for (const target of this.combatants) {
+        if (target === attacker || !target.isAlive) continue;
+        const dist = Phaser.Math.Distance.Between(attacker.x, attacker.y, target.x, target.y);
+        if (dist > cfg.RANGE + target.radius) continue;
+        const angleToTarget = Phaser.Math.Angle.Between(attacker.x, attacker.y, target.x, target.y);
+        const diff = Phaser.Math.Angle.Wrap(angleToTarget - attacker.facing);
+        if (Math.abs(diff) > halfAngle) continue;
+
+        const vsGuard = target.state === STATES.PARRYING;
+        const invincibleBroken = target.isInvincible; // checked before any mutation below
+        if (vsGuard || invincibleBroken) {
+          target.applyStun(cfg.VS_GUARD_STUN_MS, { bypassInvincible: true });
+          attacker._grantFastCharge(); // a successful freeze speeds up the caster's next Q
+          counteredGuard = true;
+          Sfx.blizzardFreeze();
+          this._spawnImpactBurst(target.x, target.y, 0x7fd0ff, { ringR: 34, bits: 7, dist: 32 });
+        } else {
+          target._slowedMs = cfg.SLOW_MS;
+          this._spawnImpactBurst(target.x, target.y, 0xdff6ff, { ringR: 24, bits: 5, dist: 22 });
+        }
+        this.hitstopMs = 45;
+      }
+      attacker.markBlizzardApplied(counteredGuard);
     }
   }
 
@@ -804,6 +1034,12 @@ export default class ArenaScene extends Phaser.Scene {
     heldGuard: "방패 들기",
     kickCone: "발차기",
     shieldCharge: "방패 돌진",
+    axeSwing: "도끼 휘두르기",
+    battleCry: "전투 함성",
+    divingSlam: "강하 슬램",
+    laserBeam: "레이저",
+    fluidState: "유체화",
+    blizzard: "눈보라",
   };
 
   _updateHud() {
@@ -813,7 +1049,7 @@ export default class ArenaScene extends Phaser.Scene {
     const t = p.skills.skillTypes;
     this.hud.textContent =
       `L-Click Hold: 이동 (커서 방향)   Q: ${labels[t.q]}   W: ${labels[t.w]}   E: ${labels[t.e]}\n` +
-      `Player: ${p.state}${p.state === STATES.CHARGING ? ` (${(p.chargeTime / 1000).toFixed(2)}s)` : ""}  alive=${p.isAlive}\n` +
+      `Player: ${p.state}${p.state === STATES.CHARGING || p.state === STATES.SLAM_CHARGE || p.state === STATES.LASER_CHARGE ? ` (${(p.chargeTime / 1000).toFixed(2)}s)` : ""}  alive=${p.isAlive}\n` +
       `Dummy:  ${this.dummy.state}  alive=${this.dummy.isAlive}`;
 
     this._updateSkillBar(p);
@@ -833,10 +1069,18 @@ export default class ArenaScene extends Phaser.Scene {
         ? STUN_FILL
         : p.state === STATES.CHARGING
         ? { pct: (p.chargeTime / p.skills.qDash.MAX_CHARGE_MS) * 100, color: "#ff9f43", active: true }
+        : p.state === STATES.LASER_CHARGE
+        ? {
+            pct: Math.min(100, (p.chargeTime / p.laserMinChargeMs) * 100),
+            color: p.chargeTime >= p.laserMinChargeMs ? "#d9bfff" : "#6a5a8a",
+            active: true,
+          }
         : p.state === STATES.DASH ||
           p.state === STATES.COMBO_WINDOW ||
           p.state === STATES.COMBO_ATTACK ||
-          p.state === STATES.EMPOWERED_STRIKE
+          p.state === STATES.EMPOWERED_STRIKE ||
+          p.state === STATES.AXE_SWING ||
+          p.state === STATES.LASER_FIRE
         ? { pct: 100, color: p.state === STATES.EMPOWERED_STRIKE ? "#ffe066" : "#ff9f43", active: true }
         : p.state === STATES.GCD
         ? GCD_FILL
@@ -847,6 +1091,18 @@ export default class ArenaScene extends Phaser.Scene {
         ? p.skills.skillTypes.w === "heldGuard"
           ? { pct: (p.stateTimer / p.skills.wParry.MAX_HOLD_MS) * 100, color: "#7ff0ff", active: true }
           : { pct: 100, color: "#7ff0ff", active: true }
+        : p.state === STATES.BATTLE_CRY
+        ? {
+            pct: 100 - (p.stateTimer / p.skills.battleCry.TOTAL_MS) * 100,
+            color: p.isInvincible ? "#ff4040" : "#8a8f99",
+            active: true,
+          }
+        : p.state === STATES.FLUID
+        ? {
+            pct: 100 - (p.stateTimer / p.skills.fluidState.TOTAL_MS) * 100,
+            color: p.isInvincible ? "#b98cff" : "#8ff0ff",
+            active: true,
+          }
         : p.state === STATES.GCD
         ? GCD_FILL
         : READY,
@@ -854,6 +1110,12 @@ export default class ArenaScene extends Phaser.Scene {
         ? STUN_FILL
         : p.state === STATES.KICKING || p.state === STATES.SHIELD_CHARGE
         ? { pct: 100, color: p.state === STATES.SHIELD_CHARGE ? "#8fa8c8" : "#ffcc33", active: true }
+        : p.state === STATES.SLAM_CHARGE
+        ? { pct: (p.chargeTime / p.skills.divingSlam.MAX_CHARGE_MS) * 100, color: "#c97b3a", active: true }
+        : p.state === STATES.SLAMMING || p.state === STATES.SLAM_IMPACT
+        ? { pct: 100, color: "#c97b3a", active: true }
+        : p.state === STATES.BLIZZARD
+        ? { pct: 100, color: "#7fd0ff", active: true }
         : p.state === STATES.GCD
         ? GCD_FILL
         : READY,

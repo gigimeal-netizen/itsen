@@ -3,6 +3,7 @@ import {
   GLOBAL_COOLDOWN_MS,
   STUN_DURATION_MS,
   SLOW_ZONE_FACTOR,
+  SLOW_DEBUFF_FACTOR,
   RESPAWN_DELAY_MS,
   WALL_STUN_MS,
   FAILED_PARRY_GCD_MULTIPLIER,
@@ -69,6 +70,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this.qPressed = false; // tap edge — read by non-charging Q skills (e.g. Knight's comboDash)
     this.wHeld = false; // held-guard classes (e.g. Knight) read this instead of wPressed
     this.wPressed = false;
+    this.eHeld = false; // hold-to-charge E classes (e.g. Warrior's divingSlam) read this instead of ePressed
     this.ePressed = false;
 
     // set by the arena each frame from terrain zones (Q dash ignores this)
@@ -86,6 +88,17 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this._empoweredQMs = 0; // Knight: time left on the empowered-Q buff, granted by a successful block
     this._shieldCharge = null; // Knight E: { dx, dy, remaining }
     this._shieldChargeCounteredGuard = false; // this shield charge hit a PARRYING/guarding target -> skip GCD
+    this._axeSwingHitApplied = false; // Warrior Q: one-shot per AXE_SWING instance
+    this._battleCryShoutApplied = false; // Warrior W: one-shot per BATTLE_CRY instance
+    this._skillsDisabledMs = 0; // time left unable to start Q/W/E (hit by a Warrior's battle cry)
+    this._slam = null; // Warrior E: { dx, dy, remaining, impactRadius }
+    this._slamImpactHitApplied = false; // Warrior E: one-shot per SLAM_IMPACT instance
+    this._laserFireHitApplied = false; // Mage Q: one-shot per LASER_FIRE instance
+    this._laser = null; // Mage Q: { length, width }, resolved at release from charge ratio
+    this._blizzardHitApplied = false; // Mage E: one-shot per BLIZZARD instance
+    this._slowedMs = 0; // time left at reduced move speed (hit by a Mage's blizzard) — see _moveSpeed()
+    this._fastChargeMs = 0; // Mage: time left on the fast-charge Q buff, granted by a W block or E freeze
+    this._blizzardCounteredGuard = false; // this blizzard hit froze a PARRYING/fluid target -> skip GCD
   }
 
   destroyEntity() {
@@ -101,19 +114,65 @@ export default class Combatant extends Phaser.GameObjects.Container {
     return PLAYER.RADIUS;
   }
 
+  // Any state whose charge loop (chargeLoopStart/Update) might be running —
+  // covers every hold-to-charge skill across all classes so the shared loop
+  // sound is guaranteed to stop the instant that state is left for ANY
+  // reason (a clean release, a cancel, getting stunned/killed mid-charge,
+  // hitting a wall), not just the specific release path each skill happens
+  // to code. Individual skills may still call chargeLoopStop() themselves on
+  // their own release path too — it's idempotent, so that's harmless, but
+  // this is what actually guarantees it can never keep looping.
+  static CHARGING_STATES = [STATES.CHARGING, STATES.SLAM_CHARGE, STATES.LASER_CHARGE];
+
   setState(next) {
-    if (this.state === STATES.CHARGING && next !== STATES.CHARGING) {
+    const wasCharging = Combatant.CHARGING_STATES.includes(this.state);
+    const isCharging = Combatant.CHARGING_STATES.includes(next);
+    if (wasCharging && !isCharging) {
       Sfx.chargeLoopStop();
     }
     this.state = next;
     this.stateLabel.setText(next);
   }
 
+  // Both Warrior's battle cry and Mage's fluid state share this shape: only
+  // the first DURATION_MS of the state is invincible; whatever follows (the
+  // AOE windup / the haste window) is not. Centralized here rather than
+  // special-cased in every ArenaScene hit-test: kill()/applyStun()/
+  // applyKnockback() all guard on this, so any current or future skill's
+  // hit-application automatically respects it for free. Does NOT protect
+  // against dieFromHazard() (ring-out/pit) — that's positional, not a "hit."
+  get isInvincible() {
+    if (this.state === STATES.BATTLE_CRY) {
+      const cfg = this.skills.battleCry;
+      return this.stateTimer > cfg.TOTAL_MS - cfg.DURATION_MS;
+    }
+    if (this.state === STATES.FLUID) {
+      const cfg = this.skills.fluidState;
+      return this.stateTimer > cfg.TOTAL_MS - cfg.DURATION_MS;
+    }
+    return false;
+  }
+
   // Called by the arena when this combatant should die instantly (Q hit / ring-out).
   // `cutAngle` is the attacker's travel direction — the body splits along that
-  // line and the two halves fly apart perpendicular to it.
-  kill(cutAngle = this.facing) {
-    if (!this.isAlive) return;
+  // line and the two halves fly apart perpendicular to it. Returns whether it
+  // actually killed (false if already dead or invincible) — callers that grant
+  // a GCD exemption/celebratory VFX for "landed a kill" must check this.
+  // `attacker`, if given, gets stunned when the kill is blocked by
+  // invincibility — attacking a battle-cry Warrior in range is punished,
+  // same shape as failing a Q-vs-parry check (only Q-family skills call
+  // kill(), so this never fires for E, which is meant to beat W outright).
+  kill(cutAngle = this.facing, attacker = null) {
+    if (!this.isAlive) return false;
+    if (this.isInvincible) {
+      if (attacker) attacker.applyStun();
+      this._grantFastCharge(); // Mage: a successful W block speeds up the next Q
+      // End the cast right now instead of waiting out the rest of its
+      // duration — same immediate-response shape as a normal tap-parry's
+      // parrySuccess(), and skips GCD entirely (goes straight to IDLE).
+      this.setState(STATES.IDLE);
+      return false;
+    }
     this.isAlive = false;
     this._endDashScratch();
     this.setState(STATES.DEAD);
@@ -128,6 +187,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this.scene.cameras.main.shake(180, 0.011);
     this.scene.cameras.main.flash(140, 90, 0, 0);
     this._respawnClock = RESPAWN_DELAY_MS;
+    return true;
   }
 
   // Called by the arena when this combatant falls off the edge (ring-out)
@@ -181,8 +241,25 @@ export default class Combatant extends Phaser.GameObjects.Container {
   // selfStunFromParry() — this method is never called on a parrying dasher
   // target for that path), so there's deliberately no PARRYING guard here:
   // per spec, E's kick beats W and always lands.
-  applyStun(durationMs = STUN_DURATION_MS) {
+  //
+  // `attacker`/`bypassInvincible` mirror kill()'s battle-cry handling: by
+  // default a hit blocked by invincibility stuns the attacker instead (Q-
+  // family and Knight's shieldCharge-vs-plain-hit path); E-family callers
+  // (kickCone, shieldCharge's vs-guard branch, divingSlam) pass
+  // bypassInvincible: true instead, since E is designed to beat W/invincibility
+  // outright rather than be punished for touching it — hitting a battle-cry
+  // Warrior with E stuns THEM, "failing" the battle cry.
+  applyStun(durationMs = STUN_DURATION_MS, { attacker = null, bypassInvincible = false } = {}) {
     if (!this.isAlive) return;
+    if (this.isInvincible && !bypassInvincible) {
+      if (attacker) attacker.applyStun();
+      this._grantFastCharge(); // Mage: a successful W block speeds up the next Q
+      // End the cast right now instead of waiting out the rest of its
+      // duration — same immediate-response shape as a normal tap-parry's
+      // parrySuccess(), and skips GCD entirely (goes straight to IDLE).
+      this.setState(STATES.IDLE);
+      return;
+    }
     this._dash = null;
     this.body.setVelocity(0, 0);
     this.setState(STATES.STUNNED);
@@ -190,8 +267,18 @@ export default class Combatant extends Phaser.GameObjects.Container {
     Sfx.stun(durationMs);
   }
 
-  applyKnockback(fromAngle, distance, speed) {
+  // See applyStun() above for the attacker/bypassInvincible contract.
+  applyKnockback(fromAngle, distance, speed, { attacker = null, bypassInvincible = false } = {}) {
     if (!this.isAlive) return;
+    if (this.isInvincible && !bypassInvincible) {
+      if (attacker) attacker.applyStun();
+      this._grantFastCharge(); // Mage: a successful W block speeds up the next Q
+      // End the cast right now instead of waiting out the rest of its
+      // duration — same immediate-response shape as a normal tap-parry's
+      // parrySuccess(), and skips GCD entirely (goes straight to IDLE).
+      this.setState(STATES.IDLE);
+      return;
+    }
     this._knockback = {
       dx: Math.cos(fromAngle),
       dy: Math.sin(fromAngle),
@@ -224,6 +311,9 @@ export default class Combatant extends Phaser.GameObjects.Container {
     }
     this._clock += dtMs;
     if (this._empoweredQMs > 0) this._empoweredQMs = Math.max(0, this._empoweredQMs - dtMs);
+    if (this._skillsDisabledMs > 0) this._skillsDisabledMs = Math.max(0, this._skillsDisabledMs - dtMs);
+    if (this._slowedMs > 0) this._slowedMs = Math.max(0, this._slowedMs - dtMs);
+    if (this._fastChargeMs > 0) this._fastChargeMs = Math.max(0, this._fastChargeMs - dtMs);
 
     if (this.state === STATES.DASH) {
       this._updateAfterimages(dtMs);
@@ -263,6 +353,33 @@ export default class Combatant extends Phaser.GameObjects.Container {
       case STATES.EMPOWERED_STRIKE:
         this._updateEmpoweredStrike(dtMs);
         break;
+      case STATES.AXE_SWING:
+        this._updateAxeSwing(dtMs);
+        break;
+      case STATES.BATTLE_CRY:
+        this._updateBattleCry(dtMs);
+        break;
+      case STATES.SLAM_CHARGE:
+        this._updateSlamCharge(dtMs);
+        break;
+      case STATES.SLAMMING:
+        this._updateSlamming(dtMs);
+        break;
+      case STATES.SLAM_IMPACT:
+        this._updateSlamImpact(dtMs);
+        break;
+      case STATES.LASER_CHARGE:
+        this._updateLaserCharge(dtMs);
+        break;
+      case STATES.LASER_FIRE:
+        this._updateLaserFire(dtMs);
+        break;
+      case STATES.FLUID:
+        this._updateFluidState(dtMs);
+        break;
+      case STATES.BLIZZARD:
+        this._updateBlizzard(dtMs);
+        break;
       case STATES.STUNNED:
         this.body.setVelocity(0, 0);
         this.figure.setAlpha(0.55 + 0.45 * Math.abs(Math.sin(this._clock * 0.012)));
@@ -293,10 +410,21 @@ export default class Combatant extends Phaser.GameObjects.Container {
     if (this.stateTimer <= 0) onExpire();
   }
 
+  // Central place every movement speed calculation should route through, so
+  // a new externally-inflicted movement debuff (currently just Mage's
+  // blizzard slow) only needs to be taught here once instead of at every
+  // individual movement-capable state's own velocity calc.
+  _moveSpeed(base) {
+    let speed = base;
+    if (this.inSlowZone) speed *= SLOW_ZONE_FACTOR;
+    if (this._slowedMs > 0) speed *= SLOW_DEBUFF_FACTOR;
+    return speed;
+  }
+
   _updateIdleLike(dtMs, speedScale) {
     this.facing = this.aimAngle;
     if (this.wantsMove) {
-      const speed = this.inSlowZone ? speedScale * SLOW_ZONE_FACTOR : speedScale;
+      const speed = this._moveSpeed(speedScale);
       const vx = Math.cos(this.facing) * speed;
       const vy = Math.sin(this.facing) * speed;
       this.body.setVelocity(vx, vy);
@@ -306,11 +434,29 @@ export default class Combatant extends Phaser.GameObjects.Container {
   }
 
   _tryStartSkills() {
+    // Hit by a Warrior's battle cry — can't start any skill (movement/GCD
+    // are unaffected) until the debuff timer runs out.
+    if (this._skillsDisabledMs > 0) return;
+
     const skillTypes = this.skills.skillTypes;
     if (skillTypes.q === "comboDash") {
       // No hold-to-charge — a tap fires a fixed-distance dash immediately.
       if (this.qPressed) {
         this._startComboDash();
+        return;
+      }
+    } else if (skillTypes.q === "axeSwing") {
+      // No hold-to-charge either — an instant 360-degree hit around self.
+      if (this.qPressed) {
+        this._startAxeSwing();
+        return;
+      }
+    } else if (skillTypes.q === "laserBeam") {
+      // Hold-to-charge like the default below, but the charge/release shape
+      // is different enough (must-complete-to-fire, no early-release scaling)
+      // that it gets its own state/methods — see _startLaserCharge.
+      if (this.qHeld) {
+        this._startLaserCharge();
         return;
       }
     } else if (this.qHeld) {
@@ -326,6 +472,16 @@ export default class Combatant extends Phaser.GameObjects.Container {
         this._startHeldGuard();
         return;
       }
+    } else if (skillTypes.w === "battleCry") {
+      if (this.wPressed) {
+        this._startBattleCry();
+        return;
+      }
+    } else if (skillTypes.w === "fluidState") {
+      if (this.wPressed) {
+        this._startFluidState();
+        return;
+      }
     } else if (this.wPressed) {
       this.setState(STATES.PARRYING);
       this.stateTimer = this.skills.wParry.DURATION_MS;
@@ -334,11 +490,25 @@ export default class Combatant extends Phaser.GameObjects.Container {
       Sfx.parryStance();
       return;
     }
-    if (this.ePressed) {
-      if (skillTypes.e === "shieldCharge") {
+    if (skillTypes.e === "shieldCharge") {
+      if (this.ePressed) {
         this._startShieldCharge();
         return;
       }
+    } else if (skillTypes.e === "divingSlam") {
+      // Hold-to-charge, mirrors Q's CHARGING shape but for E — see
+      // _startSlamCharge/_updateSlamCharge/_releaseSlam.
+      if (this.eHeld) {
+        this._startSlamCharge();
+        return;
+      }
+    } else if (skillTypes.e === "blizzard") {
+      // Instant tap, no charge — a wide cone burst in the facing direction.
+      if (this.ePressed) {
+        this._startBlizzard();
+        return;
+      }
+    } else if (this.ePressed) {
       this.setState(STATES.KICKING);
       this.stateTimer = this.skills.eKick.TOTAL_MS;
       this._kickHitApplied = false;
@@ -360,8 +530,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
 
   _updateCharging(dtMs) {
     this.facing = this.aimAngle;
-    let speed = PLAYER.BASE_SPEED * PLAYER.CHARGE_SPEED_FACTOR;
-    if (this.inSlowZone) speed *= SLOW_ZONE_FACTOR;
+    const speed = this._moveSpeed(PLAYER.BASE_SPEED * PLAYER.CHARGE_SPEED_FACTOR);
     if (this.wantsMove) {
       this.body.setVelocity(Math.cos(this.facing) * speed, Math.sin(this.facing) * speed);
     } else {
@@ -487,6 +656,328 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this._empoweredStrikeHitApplied = true;
   }
 
+  // Warrior Q: instant 360-degree hit around self, no travel, no charge.
+  _startAxeSwing() {
+    this.setState(STATES.AXE_SWING);
+    this.stateTimer = this.skills.axeSwing.TOTAL_MS;
+    this._axeSwingHitApplied = false;
+    this.body.setVelocity(0, 0);
+    Sfx.axeSwing();
+  }
+
+  _updateAxeSwing(dtMs) {
+    this.body.setVelocity(0, 0);
+    this._tickTimer(dtMs, () => this.enterGCD());
+  }
+
+  get isAxeSwingActive() {
+    const cfg = this.skills.axeSwing;
+    return (
+      this.state === STATES.AXE_SWING &&
+      !this._axeSwingHitApplied &&
+      this.stateTimer <= cfg.TOTAL_MS &&
+      this.stateTimer > cfg.TOTAL_MS - cfg.ACTIVE_MS
+    );
+  }
+
+  markAxeSwingApplied() {
+    this._axeSwingHitApplied = true;
+  }
+
+  // Warrior W: 0.5s self-invincibility (see isInvincible) plus a one-shot
+  // AOE debuff burst — see ArenaScene._checkBattleCryShout for the actual
+  // AOE application, this only owns the caster's own state/timer.
+  _startBattleCry() {
+    this.setState(STATES.BATTLE_CRY);
+    this.stateTimer = this.skills.battleCry.TOTAL_MS;
+    this._battleCryShoutApplied = false;
+    this.body.setVelocity(0, 0);
+    Sfx.battleCryShout();
+  }
+
+  // Unlike every other cast-a-skill window in this game, battle cry doesn't
+  // root the Warrior in place — it's mobile for its whole duration (both the
+  // invincible phase and the AOE windup), same movement shape as heldGuard.
+  _updateBattleCry(dtMs) {
+    this.facing = this.aimAngle;
+    if (this.wantsMove) {
+      const speed = this._moveSpeed(PLAYER.BASE_SPEED);
+      this.body.setVelocity(Math.cos(this.facing) * speed, Math.sin(this.facing) * speed);
+    } else {
+      this.body.setVelocity(0, 0);
+    }
+    // A successful invincibility block ends the cast immediately (see
+    // kill()/applyStun()/applyKnockback()'s isInvincible guard) rather than
+    // waiting for this timer, so reaching here always means "no block."
+    this._tickTimer(dtMs, () => this.enterGCD());
+  }
+
+  // Unlike every other is<X>Active getter, this window sits at the END of
+  // the state's duration, not the start — the AOE fires DISABLE_DELAY_MS
+  // after invincibility ends, not simultaneously with it (see isInvincible).
+  get isBattleCryShoutActive() {
+    const cfg = this.skills.battleCry;
+    return (
+      this.state === STATES.BATTLE_CRY &&
+      !this._battleCryShoutApplied &&
+      this.stateTimer <= cfg.ACTIVE_MS
+    );
+  }
+
+  markBattleCryShoutApplied() {
+    this._battleCryShoutApplied = true;
+  }
+
+  // Warrior E, phase 1/3: hold to charge (mirrors Q's CHARGING shape, but
+  // owned by E instead — see _tryStartSkills' divingSlam branch).
+  _startSlamCharge() {
+    this.chargeTime = 0;
+    this.setState(STATES.SLAM_CHARGE);
+    Sfx.chargeLoopStart();
+  }
+
+  _updateSlamCharge(dtMs) {
+    this.facing = this.aimAngle;
+    this.body.setVelocity(0, 0);
+    const slam = this.skills.divingSlam;
+    this.chargeTime = Math.min(this.chargeTime + dtMs, slam.MAX_CHARGE_MS);
+    Sfx.chargeLoopUpdate(this.chargeTime / slam.MAX_CHARGE_MS);
+    if (!this.eHeld) this._releaseSlam();
+  }
+
+  // Warrior E, phase 2/3: the leap itself. Distance/impact radius are both
+  // resolved once here from the charge ratio, then carried on this._slam.
+  _releaseSlam() {
+    const slam = this.skills.divingSlam;
+    const ratio = this.chargeTime / slam.MAX_CHARGE_MS;
+    this._slam = {
+      dx: Math.cos(this.facing),
+      dy: Math.sin(this.facing),
+      remaining: Phaser.Math.Linear(slam.MIN_LEAP_DISTANCE, slam.MAX_LEAP_DISTANCE, ratio),
+      impactRadius: Phaser.Math.Linear(slam.MIN_IMPACT_RADIUS, slam.MAX_IMPACT_RADIUS, ratio),
+    };
+    this.setState(STATES.SLAMMING);
+    Sfx.chargeLoopStop();
+    Sfx.slamLeap();
+    this.setScale(0.7); // airborne suggestion — flat fast travel, no real z-axis
+  }
+
+  _updateSlamming(dtMs) {
+    if (!this._slam) {
+      this.enterGCD();
+      return;
+    }
+    const slam = this.skills.divingSlam;
+    const step = (slam.LEAP_SPEED * dtMs) / 1000;
+    const travel = Math.min(step, this._slam.remaining);
+    this.body.setVelocity(this._slam.dx * slam.LEAP_SPEED, this._slam.dy * slam.LEAP_SPEED);
+    this._slam.remaining -= travel;
+    if (this._slam.remaining <= 0) {
+      this.body.setVelocity(0, 0);
+      this._finishSlamLanding();
+    }
+  }
+
+  // Warrior E, phase 3/3: landed — brief stationary impact window, hit-test
+  // centered on the actual landing position (see
+  // ArenaScene._checkSlamImpact), not where the leap started.
+  _finishSlamLanding() {
+    this.setScale(1);
+    this.setState(STATES.SLAM_IMPACT);
+    this.stateTimer = this.skills.divingSlam.TOTAL_MS;
+    this._slamImpactHitApplied = false;
+    Sfx.slamImpact();
+  }
+
+  _updateSlamImpact(dtMs) {
+    this.body.setVelocity(0, 0);
+    this._tickTimer(dtMs, () => this.enterGCD());
+  }
+
+  get isSlamImpactActive() {
+    const cfg = this.skills.divingSlam;
+    return (
+      this.state === STATES.SLAM_IMPACT &&
+      !this._slamImpactHitApplied &&
+      this.stateTimer <= cfg.TOTAL_MS &&
+      this.stateTimer > cfg.TOTAL_MS - cfg.ACTIVE_MS
+    );
+  }
+
+  markSlamImpactApplied() {
+    this._slamImpactHitApplied = true;
+  }
+
+  // A botched leap crashing into a wall mid-SLAMMING — self-stun, same
+  // failure-penalty shape as stopDashOnWall()/stopShieldChargeOnWall().
+  stopSlammingOnWall() {
+    if (this.state !== STATES.SLAMMING) return;
+    this._slam = null;
+    this.setScale(1);
+    this.body.setVelocity(0, 0);
+    Sfx.wallBump();
+    this.applyStun(WALL_STUN_MS);
+  }
+
+  // Effective charge-completion threshold — normally laserBeam.MIN_CHARGE_MS,
+  // but a successful W block or E freeze (see _grantFastCharge) temporarily
+  // drops it to fastCharge.CHARGE_MS. Used as the ratio's zero-point too, so
+  // length/width scaling stays smooth regardless of which threshold is live.
+  get laserMinChargeMs() {
+    const laser = this.skills.laserBeam;
+    if (this._fastChargeMs > 0 && this.skills.fastCharge) return this.skills.fastCharge.CHARGE_MS;
+    return laser.MIN_CHARGE_MS;
+  }
+
+  // Reward for a successful W block (an attacker punished by fluid
+  // invincibility — see kill()/applyStun()/applyKnockback()) or a successful
+  // E freeze (see ArenaScene._checkBlizzard): Q's charge-completion
+  // threshold drops until it's used or the buff silently expires. No-op for
+  // classes without a fastCharge config (everyone but Mage, so far).
+  _grantFastCharge() {
+    const cfg = this.skills.fastCharge;
+    if (!cfg) return;
+    this._fastChargeMs = cfg.DURATION_MS;
+  }
+
+  // Mage Q, phase 1/2: hold to charge. Unlike every other charge-based skill
+  // in this game, releasing before laserMinChargeMs does nothing at all —
+  // the laser must "complete" charging before it can fire; holding further
+  // (up to MAX_CHARGE_MS) keeps scaling length/width, resolved at release.
+  _startLaserCharge() {
+    this.chargeTime = 0;
+    this.setState(STATES.LASER_CHARGE);
+    Sfx.chargeLoopStart("magiQCharging");
+  }
+
+  _updateLaserCharge(dtMs) {
+    this.facing = this.aimAngle;
+    const laser = this.skills.laserBeam;
+    const speed = this._moveSpeed(PLAYER.BASE_SPEED * PLAYER.CHARGE_SPEED_FACTOR);
+    if (this.wantsMove) {
+      this.body.setVelocity(Math.cos(this.facing) * speed, Math.sin(this.facing) * speed);
+    } else {
+      this.body.setVelocity(0, 0);
+    }
+    this.chargeTime = Math.min(this.chargeTime + dtMs, laser.MAX_CHARGE_MS);
+    Sfx.chargeLoopUpdate(this.chargeTime / laser.MAX_CHARGE_MS);
+    if (!this.qHeld) {
+      if (this.chargeTime >= this.laserMinChargeMs) this._releaseLaser();
+      else {
+        // Released too early — cancelled, no beam, just the standard GCD.
+        Sfx.chargeLoopStop();
+        this.enterGCD();
+      }
+    }
+  }
+
+  // Mage Q, phase 2/2: length/width are both resolved once here from the
+  // charge ratio (0 at laserMinChargeMs, 1 at MAX_CHARGE_MS), then carried
+  // on this._laser for ArenaScene._checkLaserFire's rectangle hit-test.
+  _releaseLaser() {
+    const laser = this.skills.laserBeam;
+    const minChargeMs = this.laserMinChargeMs;
+    this._fastChargeMs = 0; // consumed on use, same as Knight's empoweredQBuff
+    const ratio = Phaser.Math.Clamp(
+      (this.chargeTime - minChargeMs) / (laser.MAX_CHARGE_MS - minChargeMs),
+      0,
+      1
+    );
+    this._laser = {
+      length: Phaser.Math.Linear(laser.MIN_LENGTH, laser.MAX_LENGTH, ratio),
+      width: Phaser.Math.Linear(laser.MIN_WIDTH, laser.MAX_WIDTH, ratio),
+    };
+    this.setState(STATES.LASER_FIRE);
+    this.stateTimer = laser.TOTAL_MS;
+    this._laserFireHitApplied = false;
+    this.body.setVelocity(0, 0);
+    Sfx.chargeLoopStop();
+    Sfx.laserFire();
+  }
+
+  _updateLaserFire(dtMs) {
+    this.body.setVelocity(0, 0);
+    this._tickTimer(dtMs, () => this.enterGCD());
+  }
+
+  get isLaserFireActive() {
+    const cfg = this.skills.laserBeam;
+    return (
+      this.state === STATES.LASER_FIRE &&
+      !this._laserFireHitApplied &&
+      this.stateTimer <= cfg.TOTAL_MS &&
+      this.stateTimer > cfg.TOTAL_MS - cfg.ACTIVE_MS
+    );
+  }
+
+  markLaserFireApplied() {
+    this._laserFireHitApplied = true;
+  }
+
+  // Mage W: 0.5s self-invincibility (see isInvincible) immediately followed
+  // by a 1s move-speed haste window — both phases are mobile, same movement
+  // shape as Warrior's battle cry (see _updateFluidState).
+  _startFluidState() {
+    this.setState(STATES.FLUID);
+    this.stateTimer = this.skills.fluidState.TOTAL_MS;
+    this.body.setVelocity(0, 0);
+    Sfx.fluidStateStart();
+  }
+
+  _updateFluidState(dtMs) {
+    this.facing = this.aimAngle;
+    const cfg = this.skills.fluidState;
+    const hasted = this.stateTimer <= cfg.TOTAL_MS - cfg.DURATION_MS;
+    if (this.wantsMove) {
+      const speed = this._moveSpeed(PLAYER.BASE_SPEED * (hasted ? cfg.HASTE_MULTIPLIER : 1));
+      this.body.setVelocity(Math.cos(this.facing) * speed, Math.sin(this.facing) * speed);
+    } else {
+      this.body.setVelocity(0, 0);
+    }
+    // A successful invincibility block ends the cast immediately (see
+    // kill()/applyStun()/applyKnockback()'s isInvincible guard) rather than
+    // waiting for this timer, so reaching here always means "no block."
+    this._tickTimer(dtMs, () => this.enterGCD());
+  }
+
+  // Mage E: instant wide cone, no charge — see ArenaScene._checkBlizzard for
+  // the actual hit-test/slow-or-freeze application, this only owns the
+  // caster's own state/timer (same split as Warrior's axeSwing/battleCry).
+  _startBlizzard() {
+    this.setState(STATES.BLIZZARD);
+    this.stateTimer = this.skills.blizzard.TOTAL_MS;
+    this._blizzardHitApplied = false;
+    this._blizzardCounteredGuard = false;
+    this.body.setVelocity(0, 0);
+    Sfx.blizzardCast();
+  }
+
+  _updateBlizzard(dtMs) {
+    this.body.setVelocity(0, 0);
+    this._tickTimer(dtMs, () => {
+      // Freezing a PARRYING/fluid target (E beating W) exempts the global
+      // cooldown, same as Knight's kick-counters-parry / shield-charge-vs-
+      // guard — previously blizzard always paid the full GCD either way.
+      if (this._blizzardCounteredGuard) this.setState(STATES.IDLE);
+      else this.enterGCD();
+    });
+  }
+
+  get isBlizzardActive() {
+    const cfg = this.skills.blizzard;
+    return (
+      this.state === STATES.BLIZZARD &&
+      !this._blizzardHitApplied &&
+      this.stateTimer <= cfg.TOTAL_MS &&
+      this.stateTimer > cfg.TOTAL_MS - cfg.ACTIVE_MS
+    );
+  }
+
+  markBlizzardApplied(counteredGuard = false) {
+    this._blizzardHitApplied = true;
+    this._blizzardCounteredGuard = counteredGuard;
+  }
+
   // A scuffed groove in the ground tracing exactly how far the dash actually
   // travels (not the intended max distance) — grown incrementally in
   // _updateDashScratch() each frame so it naturally stops wherever the dash
@@ -609,6 +1100,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
   handleWallStop() {
     if (this.state === STATES.DASH) this.stopDashOnWall();
     else if (this.state === STATES.SHIELD_CHARGE) this.stopShieldChargeOnWall();
+    else if (this.state === STATES.SLAMMING) this.stopSlammingOnWall();
   }
 
   // Called by the arena when this dashing combatant rams a PARRYING opponent.
@@ -626,8 +1118,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
       // doesn't root the player in place like a tap-parry does.
       this.facing = this.aimAngle;
       if (this.wantsMove) {
-        let speed = PLAYER.BASE_SPEED * this.skills.wParry.MOVE_SPEED_MULTIPLIER;
-        if (this.inSlowZone) speed *= SLOW_ZONE_FACTOR;
+        const speed = this._moveSpeed(PLAYER.BASE_SPEED * this.skills.wParry.MOVE_SPEED_MULTIPLIER);
         this.body.setVelocity(Math.cos(this.facing) * speed, Math.sin(this.facing) * speed);
       } else {
         this.body.setVelocity(0, 0);
@@ -821,6 +1312,26 @@ export default class Combatant extends Phaser.GameObjects.Container {
       this._drawEmpoweredStrikeRect();
       return;
     }
+    if (this.state === STATES.AXE_SWING) {
+      this._drawAxeSwingRing();
+      return;
+    }
+    if (this.state === STATES.BATTLE_CRY) {
+      this._drawBattleCryTelegraph();
+      return;
+    }
+    if (this.state === STATES.SLAM_CHARGE || this.state === STATES.SLAMMING) {
+      this._drawSlamPreview();
+      return;
+    }
+    if (this.state === STATES.SLAM_IMPACT) {
+      this._drawSlamImpactRing();
+      return;
+    }
+    if (this.state === STATES.LASER_CHARGE || this.state === STATES.LASER_FIRE) {
+      this._drawLaserPreview();
+      return;
+    }
     let cfg;
     let fillColor = 0xfff3b0;
     let edgeColor = 0xffcc33;
@@ -830,6 +1341,12 @@ export default class Combatant extends Phaser.GameObjects.Container {
       cfg = this.skills.comboAttack;
       fillColor = 0xffe8c2;
       edgeColor = 0xd98c3a;
+    } else if (this.state === STATES.BLIZZARD) {
+      // Same cone-sweep shape as the melee cones above (RANGE/HALF_ANGLE_DEG
+      // line up), just icy-colored instead of a strike swipe.
+      cfg = this.skills.blizzard;
+      fillColor = 0xdff6ff;
+      edgeColor = 0x7fd0ff;
     } else {
       return;
     }
@@ -879,6 +1396,138 @@ export default class Combatant extends Phaser.GameObjects.Container {
     }
   }
 
+  // Warrior Q's 360-degree hit radius, drawn as a plain circle around self
+  // (no facing dependency, unlike every other range indicator here) so its
+  // "everywhere around me" shape reads at a glance.
+  _drawAxeSwingRing() {
+    const cfg = this.skills.axeSwing;
+    const elapsed = cfg.TOTAL_MS - this.stateTimer;
+    if (elapsed <= cfg.ACTIVE_MS) {
+      const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
+      this.kickCone.fillStyle(0xd9c9a3, 0.22 * (1 - t * 0.4));
+      this.kickCone.fillCircle(0, 0, cfg.RADIUS);
+      this.kickCone.lineStyle(3, 0xd9c9a3, 0.9);
+      this.kickCone.strokeCircle(0, 0, cfg.RADIUS);
+    } else {
+      const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
+      this.kickCone.fillStyle(0xd9c9a3, 0.12 * (1 - t));
+      this.kickCone.fillCircle(0, 0, cfg.RADIUS);
+    }
+  }
+
+  // Warrior W's AOE shout radius, telegraphed for the entire windup so the
+  // "1s after invincibility ends" delay actually reads as a warning instead
+  // of a surprise — the ring brightens as the burst approaches, then flashes
+  // and fades once the AOE actually fires (see isBattleCryShoutActive).
+  _drawBattleCryTelegraph() {
+    const cfg = this.skills.battleCry;
+    const elapsed = cfg.TOTAL_MS - this.stateTimer;
+    const burstStart = cfg.TOTAL_MS - cfg.ACTIVE_MS;
+    if (elapsed <= burstStart) {
+      const ratio = Phaser.Math.Clamp(elapsed / burstStart, 0, 1);
+      const pulse = 0.3 + 0.4 * ratio + 0.15 * Math.sin(this._clock * 0.03);
+      this.kickCone.lineStyle(2, 0x8a8f99, pulse);
+      this.kickCone.strokeCircle(0, 0, cfg.SHOUT_RADIUS);
+    } else {
+      const t = Phaser.Math.Clamp((elapsed - burstStart) / cfg.ACTIVE_MS, 0, 1);
+      this.kickCone.fillStyle(0x8a8f99, 0.4 * (1 - t));
+      this.kickCone.fillCircle(0, 0, cfg.SHOUT_RADIUS);
+      this.kickCone.lineStyle(4, 0xffffff, 0.9 * (1 - t));
+      this.kickCone.strokeCircle(0, 0, cfg.SHOUT_RADIUS);
+    }
+  }
+
+  // Warrior E's projected landing spot — a line out to the leap distance
+  // plus a circle at the impact radius, both scaling live with charge ratio
+  // during SLAM_CHARGE and simply carried over (unchanged) during the leap
+  // itself, so the player can see exactly where/how big the slam will land
+  // before committing. Local +x is always "facing", which stays fixed for
+  // the whole leap once released, so a single dirAngle=0 line covers both
+  // states.
+  _drawSlamPreview() {
+    const slam = this.skills.divingSlam;
+    let leapDistance;
+    let impactRadius;
+    if (this.state === STATES.SLAM_CHARGE) {
+      const ratio = this.chargeTime / slam.MAX_CHARGE_MS;
+      leapDistance = Phaser.Math.Linear(slam.MIN_LEAP_DISTANCE, slam.MAX_LEAP_DISTANCE, ratio);
+      impactRadius = Phaser.Math.Linear(slam.MIN_IMPACT_RADIUS, slam.MAX_IMPACT_RADIUS, ratio);
+    } else if (this._slam) {
+      leapDistance = this._slam.remaining;
+      impactRadius = this._slam.impactRadius;
+    } else {
+      return;
+    }
+    this.kickCone.lineStyle(2, 0xc97b3a, 0.55);
+    this.kickCone.beginPath();
+    this.kickCone.moveTo(0, 0);
+    this.kickCone.lineTo(leapDistance, 0);
+    this.kickCone.strokePath();
+    this.kickCone.fillStyle(0xc97b3a, 0.18);
+    this.kickCone.fillCircle(leapDistance, 0, impactRadius);
+    this.kickCone.lineStyle(3, 0xc97b3a, 0.85);
+    this.kickCone.strokeCircle(leapDistance, 0, impactRadius);
+  }
+
+  // Warrior E's actual impact radius at the landing spot, same fade shape as
+  // every other fixed-duration attack window.
+  _drawSlamImpactRing() {
+    const cfg = this.skills.divingSlam;
+    const elapsed = cfg.TOTAL_MS - this.stateTimer;
+    const radius = this._slam ? this._slam.impactRadius : cfg.MIN_IMPACT_RADIUS;
+    if (elapsed <= cfg.ACTIVE_MS) {
+      const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
+      this.kickCone.fillStyle(0xc97b3a, 0.35 * (1 - t * 0.4));
+      this.kickCone.fillCircle(0, 0, radius);
+      this.kickCone.lineStyle(3, 0xc97b3a, 0.9);
+      this.kickCone.strokeCircle(0, 0, radius);
+    } else {
+      const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
+      this.kickCone.fillStyle(0xc97b3a, 0.18 * (1 - t));
+      this.kickCone.fillCircle(0, 0, radius);
+    }
+  }
+
+  // Mage Q's projected beam — a thin preview rectangle that grows in length
+  // and width live with charge ratio (mirrors _drawSlamPreview's live-scaling
+  // idea), then the actual full-brightness beam rectangle once fired (same
+  // fade shape as _drawEmpoweredStrikeRect).
+  _drawLaserPreview() {
+    const laser = this.skills.laserBeam;
+    if (this.state === STATES.LASER_CHARGE) {
+      const minChargeMs = this.laserMinChargeMs;
+      if (this.chargeTime < minChargeMs) return; // not "complete" yet — nothing to preview
+      const ratio = Phaser.Math.Clamp(
+        (this.chargeTime - minChargeMs) / (laser.MAX_CHARGE_MS - minChargeMs),
+        0,
+        1
+      );
+      const length = Phaser.Math.Linear(laser.MIN_LENGTH, laser.MAX_LENGTH, ratio);
+      const halfW = Phaser.Math.Linear(laser.MIN_WIDTH, laser.MAX_WIDTH, ratio) / 2;
+      const pulse = 0.35 + 0.15 * Math.sin(this._clock * 0.03);
+      this.kickCone.fillStyle(0xb98cff, 0.22 * pulse);
+      this.kickCone.fillRect(0, -halfW, length, halfW * 2);
+      this.kickCone.lineStyle(2, 0xd9bfff, 0.7);
+      this.kickCone.strokeRect(0, -halfW, length, halfW * 2);
+      return;
+    }
+    const cfg = this.skills.laserBeam;
+    const halfW = (this._laser ? this._laser.width : cfg.MIN_WIDTH) / 2;
+    const length = this._laser ? this._laser.length : cfg.MIN_LENGTH;
+    const elapsed = cfg.TOTAL_MS - this.stateTimer;
+    if (elapsed <= cfg.ACTIVE_MS) {
+      const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
+      this.kickCone.fillStyle(0xd9bfff, 0.75 * (1 - t * 0.3));
+      this.kickCone.fillRect(0, -halfW, length, halfW * 2);
+      this.kickCone.lineStyle(3, 0xf3e8ff, 0.95);
+      this.kickCone.strokeRect(0, -halfW, length, halfW * 2);
+    } else {
+      const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
+      this.kickCone.fillStyle(0xd9bfff, 0.35 * (1 - t));
+      this.kickCone.fillRect(0, -halfW, length, halfW * 2);
+    }
+  }
+
   _drawAuraRing() {
     this.auraRing.clear();
     const r = PLAYER.RADIUS;
@@ -900,6 +1549,20 @@ export default class Combatant extends Phaser.GameObjects.Container {
       const pulse = r + 6 + 2 * Math.sin(this._clock * 0.015);
       this.auraRing.lineStyle(3, 0xff5c5c, 0.7 + 0.3 * Math.sin(this._clock * 0.02));
       this.auraRing.strokeCircle(0, 0, pulse);
+    } else if (this.state === STATES.FLUID) {
+      // Two-phase read: violet/translucent while actually invincible, then a
+      // brighter cyan-white ring once the haste phase kicks in — same idea
+      // as the isInvincible/isHasted split in _updateFluidState.
+      const pulse = r + 9 + 4 * Math.sin(this._clock * 0.03);
+      if (this.isInvincible) {
+        this.auraRing.lineStyle(3, 0xb98cff, 0.8);
+        this.auraRing.strokeCircle(0, 0, pulse);
+        this.auraRing.fillStyle(0xb98cff, 0.15);
+        this.auraRing.fillCircle(0, 0, pulse);
+      } else {
+        this.auraRing.lineStyle(3, 0x8ff0ff, 0.75 + 0.25 * Math.sin(this._clock * 0.04));
+        this.auraRing.strokeCircle(0, 0, pulse);
+      }
     }
 
     // Knight empowered-Q glow: persists through IDLE/movement (not tied to
@@ -911,6 +1574,34 @@ export default class Combatant extends Phaser.GameObjects.Container {
       const flicker = this._empoweredQMs < 1000 ? 0.5 + 0.5 * Math.sin(this._clock * 0.05) : 0.85;
       this.auraRing.fillStyle(0xffe066, 0.55 * flicker);
       this.auraRing.fillCircle(tip.x, tip.y, r * 0.28);
+    }
+
+    // Mage fast-charge buff (granted by a W block or E freeze): same
+    // "use it or lose it" glow shape as the empowered-Q one above, at the
+    // staff tip instead of the weapon tip.
+    if (this._fastChargeMs > 0) {
+      const tip = this._displayPose?.tip || { x: 0, y: 0 };
+      const flicker = this._fastChargeMs < 1000 ? 0.5 + 0.5 * Math.sin(this._clock * 0.05) : 0.85;
+      this.auraRing.fillStyle(0xd9bfff, 0.55 * flicker);
+      this.auraRing.fillCircle(tip.x, tip.y, r * 0.28);
+    }
+
+    // Warrior battle-cry debuff: shown on whoever's *affected*, regardless
+    // of their own current state — a dull grey pulsing ring, same
+    // always-checked pattern as the empowered-Q glow above.
+    if (this._skillsDisabledMs > 0) {
+      const pulse = r + 8 + 3 * Math.sin(this._clock * 0.025);
+      this.auraRing.lineStyle(3, 0x8a8f99, 0.6 + 0.25 * Math.sin(this._clock * 0.02));
+      this.auraRing.strokeCircle(0, 0, pulse);
+    }
+
+    // Mage blizzard slow: shown on whoever's *affected*, regardless of their
+    // own current state — a pale icy pulsing ring, same always-checked
+    // pattern as the two debuff glows above.
+    if (this._slowedMs > 0) {
+      const pulse = r + 7 + 3 * Math.sin(this._clock * 0.02);
+      this.auraRing.lineStyle(3, 0x7fd0ff, 0.55 + 0.25 * Math.sin(this._clock * 0.03));
+      this.auraRing.strokeCircle(0, 0, pulse);
     }
   }
 
@@ -933,7 +1624,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     // weaponStyle/shield are optional pose descriptors — default values keep
     // the swordsman's silhouette byte-identical; Knight (comboDash/heldGuard)
     // overrides them below.
-    const weaponStyle = this.skills.skillTypes.q === "comboDash" ? "hammer" : "blade";
+    const weaponStyle = this.skills.visual?.weaponStyle || "blade";
     let shield = null;
 
     switch (this.state) {
@@ -1026,6 +1717,57 @@ export default class Combatant extends Phaser.GameObjects.Container {
         }
         break;
       }
+      case STATES.AXE_SWING: {
+        // Self-centered spin: grip/tip sweep a full circle around the body
+        // over the swing's active window, reading as a wide 360-degree cut.
+        const cfg = this.skills.axeSwing;
+        const elapsed = cfg.TOTAL_MS - this.stateTimer;
+        const t = Phaser.Math.Clamp(elapsed / cfg.TOTAL_MS, 0, 1);
+        const ang = t * Math.PI * 2.4;
+        grip = { x: Math.cos(ang) * r * 0.3, y: Math.sin(ang) * r * 0.3 };
+        tip = { x: Math.cos(ang) * r * 1.9, y: Math.sin(ang) * r * 1.9 };
+        footL = { x: -r * 0.35, y: -r * 0.4 };
+        footR = { x: -r * 0.35, y: r * 0.4 };
+        break;
+      }
+      case STATES.BATTLE_CRY:
+        // Raised fists / roaring stance — both weapons pulled in and up.
+        grip = { x: r * 0.1, y: -r * 0.15 };
+        tip = { x: r * 0.2, y: -r * 0.75 };
+        footL = { x: -r * 0.4, y: -r * 0.35 };
+        footR = { x: -r * 0.4, y: r * 0.35 };
+        headX = r * 0.3;
+        break;
+      case STATES.SLAM_CHARGE: {
+        // Crouched wind-up, ratio-driven like CHARGING.
+        const ratio = this.chargeTime / this.skills.divingSlam.MAX_CHARGE_MS;
+        grip = { x: lerp(-r * 0.15, r * 0.3, ratio), y: lerp(r * 0.2, -r * 0.5, ratio) };
+        tip = { x: lerp(-r * 0.5, r * 0.5, ratio), y: lerp(r * 0.5, -r * 1.1, ratio) };
+        footL = { x: -r * 0.55, y: -r * 0.5 };
+        footR = { x: -r * 0.55, y: r * 0.5 };
+        headX = r * 0.1;
+        break;
+      }
+      case STATES.SLAMMING:
+        // Tucked-forward leap — flat fast travel, sold by the scale-down
+        // applied in _releaseSlam() rather than a real z-axis.
+        grip = { x: r * 0.3, y: -r * 0.3 };
+        tip = { x: r * 0.9, y: -r * 0.55 };
+        footL = { x: r * 0.2, y: -r * 0.2 };
+        footR = { x: r * 0.2, y: r * 0.2 };
+        headX = r * 0.3;
+        break;
+      case STATES.SLAM_IMPACT: {
+        // Driven-down double-axe pose at the landing spot.
+        const cfg = this.skills.divingSlam;
+        const elapsed = cfg.TOTAL_MS - this.stateTimer;
+        const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
+        grip = { x: lerp(r * 0.3, r * 0.1, t), y: lerp(-r * 0.9, r * 0.4, t) };
+        tip = { x: lerp(r * 0.9, r * 0.4, t), y: lerp(-r * 1.3, r * 0.8, t) };
+        footL = { x: -r * 0.3, y: -r * 0.4 };
+        footR = { x: -r * 0.3, y: r * 0.4 };
+        break;
+      }
       case STATES.KICKING: {
         grip = { x: -r * 0.25, y: r * 0.25 };
         tip = { x: -r * 1.0, y: r * 0.55 };
@@ -1048,6 +1790,53 @@ export default class Combatant extends Phaser.GameObjects.Container {
         footL = { x: -r * 0.35, y: -r * 0.25 };
         footR = { x: -r * 0.35, y: r * 0.25 };
         break;
+      case STATES.LASER_CHARGE: {
+        // Staff raised and leveled forward, ratio-driven like Q's CHARGING —
+        // only reaches full extension once laserMinChargeMs is actually met.
+        const ratio = Phaser.Math.Clamp(this.chargeTime / this.laserMinChargeMs, 0, 1);
+        grip = { x: lerp(-r * 0.1, r * 0.35, ratio), y: lerp(r * 0.2, -r * 0.15, ratio) };
+        tip = { x: lerp(-r * 0.6, r * 1.3, ratio), y: lerp(r * 0.35, -r * 0.2, ratio) };
+        footL = { x: -r * 0.55, y: -r * 0.5 };
+        footR = { x: -r * 0.55, y: r * 0.5 };
+        headX = r * 0.1;
+        break;
+      }
+      case STATES.LASER_FIRE:
+        // Staff leveled and held steady along the beam for the whole window
+        // — no swing, the beam itself (drawn separately) sells the attack.
+        grip = { x: r * 0.35, y: -r * 0.15 };
+        tip = { x: r * 1.3, y: -r * 0.2 };
+        footL = { x: -r * 0.55, y: -r * 0.5 };
+        footR = { x: -r * 0.55, y: r * 0.5 };
+        headX = r * 0.1;
+        break;
+      case STATES.FLUID:
+        // Staff pulled in close, arms loose — reads as an insubstantial,
+        // unguarded stance rather than a combat pose.
+        grip = { x: r * 0.05, y: r * 0.1 };
+        tip = { x: r * 0.1, y: r * 0.55 };
+        footL = { x: -r * 0.3, y: -r * 0.35 };
+        footR = { x: -r * 0.3, y: r * 0.35 };
+        break;
+      case STATES.BLIZZARD: {
+        // Staff swept across the cone's arc over the active window, mirrors
+        // COMBO_ATTACK's swipe shape but symmetric (starts+ends wide since
+        // the cone itself is 180 degrees).
+        const cfg = this.skills.blizzard;
+        const elapsed = cfg.TOTAL_MS - this.stateTimer;
+        footL = { x: -r * 0.35, y: -r * 0.4 };
+        footR = { x: -r * 0.35, y: r * 0.4 };
+        if (elapsed <= cfg.ACTIVE_MS) {
+          const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
+          const ang = lerp(-Math.PI * 0.4, Math.PI * 0.4, t);
+          grip = { x: r * 0.15, y: 0 };
+          tip = { x: Math.cos(ang) * r * 1.4, y: Math.sin(ang) * r * 1.4 };
+        } else {
+          grip = { x: r * 0.15, y: 0 };
+          tip = { x: r * 1.4, y: 0 };
+        }
+        break;
+      }
       default: {
         // IDLE / GCD — alternate the feet fore/aft while actually moving.
         // Stride cadence follows actual movement speed (slower in a slow
@@ -1113,10 +1902,13 @@ export default class Combatant extends Phaser.GameObjects.Container {
     );
 
     const armored = weaponStyle === "hammer";
-    // Knight reads heavier/metallic (thicker, steel-grey strokes) instead of
-    // the swordsman's lighter off-white — plate armor vs. cloth.
-    const limbColor = armored ? 0xb0b6c2 : 0xe8e8f0;
-    const limbWidth = armored ? 5 : 4;
+    const isAxes = weaponStyle === "axes";
+    const isStaff = weaponStyle === "staff";
+    // Knight reads heavier/metallic (thicker, steel-grey strokes); Warrior
+    // reads leather-tan; Mage reads robe-purple (lighter than plate, still
+    // distinct from the swordsman's plain off-white cloth).
+    const limbColor = armored ? 0xb0b6c2 : isAxes ? 0xd9c9a3 : isStaff ? 0xb39ddb : 0xe8e8f0;
+    const limbWidth = armored ? 5 : isAxes ? 4.5 : isStaff ? 4.5 : 4;
 
     g.lineStyle(limbWidth, limbColor, 0.95);
     g.beginPath();
@@ -1168,6 +1960,26 @@ export default class Combatant extends Phaser.GameObjects.Container {
       g.strokePath();
       g.fillStyle(0x4a3320, 0.9);
       g.fillCircle(grip.x, grip.y, 2.8);
+    } else if (isAxes) {
+      // Short dark leather-wrapped handle — the axe head is drawn separately
+      // at the tip end (see drawAxeHead below).
+      g.lineStyle(3, 0x4a3320, 1);
+      g.beginPath();
+      g.moveTo(grip.x, grip.y);
+      g.lineTo(tip.x, tip.y);
+      g.strokePath();
+      g.fillStyle(0x2c2018, 0.9);
+      g.fillCircle(grip.x, grip.y, 2.4);
+    } else if (isStaff) {
+      // Dark wooden shaft — the glowing orb is drawn separately at the tip
+      // (see the isStaff block below), same split as the axe head above.
+      g.lineStyle(3, 0x4a3b2e, 1);
+      g.beginPath();
+      g.moveTo(grip.x, grip.y);
+      g.lineTo(tip.x, tip.y);
+      g.strokePath();
+      g.fillStyle(0x2c2018, 0.9);
+      g.fillCircle(grip.x, grip.y, 2.6);
     } else {
       g.lineStyle(3, 0xd7dcec, 1);
       g.beginPath();
@@ -1212,6 +2024,60 @@ export default class Combatant extends Phaser.GameObjects.Container {
       );
     }
 
+    if (isAxes) {
+      // Small single-bladed hatchet head at the tip, drawn for both the
+      // primary hand and a mirrored off-hand axe — computed generically here
+      // rather than threading a second grip/tip pair through every pose
+      // case. The blade bulges out on one side of the handle line only (not
+      // mirrored both sides) so it reads as a hand axe, not a double-bit.
+      const drawAxeHead = (gx, gy, tx, ty) => {
+        const angle = Math.atan2(ty - gy, tx - gx);
+        const fx = Math.cos(angle);
+        const fy = Math.sin(angle);
+        const px = -fy;
+        const py = fx;
+        g.fillStyle(0x9aa2ad, 1);
+        g.fillPoints(
+          [
+            { x: tx - fx * 3.5, y: ty - fy * 3.5 },
+            { x: tx + fx * 1.5 + px * 6, y: ty + fy * 1.5 + py * 6 },
+            { x: tx + fx * 3.5 + px * 2, y: ty + fy * 3.5 + py * 2 },
+            { x: tx + fx * 2, y: ty + fy * 2 },
+          ],
+          true
+        );
+      };
+      drawAxeHead(grip.x, grip.y, tip.x, tip.y);
+
+      const offGrip = { x: grip.x, y: -grip.y };
+      const offTip = { x: tip.x, y: -tip.y };
+      g.lineStyle(3, limbColor, 0.95);
+      g.beginPath();
+      g.moveTo(neck.x, neck.y);
+      g.lineTo(offGrip.x, offGrip.y);
+      g.strokePath();
+      g.lineStyle(3, 0x4a3320, 1);
+      g.beginPath();
+      g.moveTo(offGrip.x, offGrip.y);
+      g.lineTo(offTip.x, offTip.y);
+      g.strokePath();
+      g.fillStyle(0x2c2018, 0.9);
+      g.fillCircle(offGrip.x, offGrip.y, 2.4);
+      drawAxeHead(offGrip.x, offGrip.y, offTip.x, offTip.y);
+    }
+
+    if (isStaff) {
+      // Glowing orb at the staff tip — pulses faster/brighter while actively
+      // charging or firing the laser, dim idle otherwise.
+      const active =
+        this.state === STATES.LASER_CHARGE || this.state === STATES.LASER_FIRE;
+      const glow = active ? 0.7 + 0.3 * Math.sin(this._clock * 0.06) : 0.55 + 0.15 * Math.sin(this._clock * 0.015);
+      g.fillStyle(0xd9bfff, glow);
+      g.fillCircle(tip.x, tip.y, active ? 6 : 4.5);
+      g.lineStyle(1.5, 0xf3e8ff, 0.8);
+      g.strokeCircle(tip.x, tip.y, active ? 6 : 4.5);
+    }
+
     // Head shape is a per-class visual pick (CLASSES[classId].visual.headShape),
     // independent of weapon/skillTypes — e.g. Knight reads "square" (a
     // helmet silhouette); future classes can pick their own so every class
@@ -1239,6 +2105,54 @@ export default class Combatant extends Phaser.GameObjects.Container {
         g.arc(headX, 0, headR, Math.PI * 1.15, Math.PI * 1.85, false);
       }
       g.strokePath();
+    }
+    if (headShape === "horned") {
+      // Two small triangular horns angled up-and-out from the sides of the
+      // head, reading as a viking helmet.
+      g.fillStyle(0xe8e2d0, 0.95);
+      for (const side of [1, -1]) {
+        const bx = headX - headR * 0.15;
+        const by = side * headR * 0.75;
+        g.fillPoints(
+          [
+            { x: bx, y: by },
+            { x: bx - headR * 0.85, y: by + side * headR * 1.4 },
+            { x: bx + headR * 0.45, y: by + side * headR * 0.5 },
+          ],
+          true
+        );
+      }
+    }
+    if (headShape === "cone") {
+      // Pointed wizard hat: a wide brim ellipse at the head's base plus a
+      // tall triangle rising off-center, reading as a cone hat rather than a
+      // bare head — a robe/staff class needs a silhouette as distinct from
+      // the helmets as the horns are.
+      g.fillStyle(0x4a3b6e, 0.95);
+      g.fillEllipse(headX, 0, headR * 2.3, headR * 0.9);
+      g.fillPoints(
+        [
+          { x: headX - headR * 0.6, y: -headR * 0.15 },
+          { x: headX + headR * 0.9, y: headR * 0.15 },
+          { x: headX + headR * 0.15, y: -headR * 2.1 },
+        ],
+        true
+      );
+    }
+    if (this.isInvincible) {
+      // Invincibility tint — a pulsing overlay on the head, shown only during
+      // the actual invincible phase (not whatever windup/haste follows it).
+      // Simplest way to read "different" without reworking every part's own
+      // fillStyle call. Color reads per-class: red for Warrior's battle cry,
+      // violet for Mage's fluid state.
+      const flash = 0.35 + 0.25 * Math.sin(this._clock * 0.05);
+      const tintColor = this.state === STATES.FLUID ? 0xb98cff : 0xff4040;
+      g.fillStyle(tintColor, flash);
+      if (headShape === "square") {
+        g.fillRect(headX - headR, -headR, headR * 2, headR * 2);
+      } else {
+        g.fillCircle(headX, 0, headR);
+      }
     }
 
     if (shield) {
@@ -1273,7 +2187,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this._afterimageClock = 22;
 
     const r = PLAYER.RADIUS;
-    const armored = this.skills.skillTypes.q === "comboDash";
+    const armored = this.skills.visual?.weaponStyle === "hammer";
     const ghost = this.scene.add.container(this.x, this.y).setRotation(this.rotation).setDepth(1);
     const body = this.scene.add.ellipse(0, 0, r * 1.9, r * 1.1, this.color, 0.32);
     const accent = armored
