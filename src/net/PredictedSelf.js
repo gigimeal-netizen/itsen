@@ -60,13 +60,11 @@ export default class PredictedSelf {
     this._dash = null; // { dx, dy, remaining }
     this._stateTimer = 0;
     this._selfTransitionAt = -Infinity;
-    this._selfTransitionConsumed = true;
   }
 
   _setState(next) {
     this.state = next;
     this._selfTransitionAt = now();
-    this._selfTransitionConsumed = false;
   }
 
   // Seeds/replaces predicted state wholesale from an authoritative snapshot
@@ -86,7 +84,6 @@ export default class PredictedSelf {
     this.score = snap.score;
     this._dash = null;
     this._selfTransitionAt = -Infinity;
-    this._selfTransitionConsumed = true;
     this.ready = true;
   }
 
@@ -259,26 +256,22 @@ export default class PredictedSelf {
     const farAway = Math.hypot(snap.x - this.x, snap.y - this.y) > PLAYER.RADIUS * 4;
     const categoryMismatch = this._category(snap.state) !== this._category(this.state);
 
-    // Trust our own prediction for any snapshot that lands within the grace
-    // window right after a self-transition, regardless of which specific
-    // pre-transition state it's still showing. We used to require the
-    // snapshot match this._prevState exactly (only the ONE packet already
-    // in flight when we transitioned), but chaining two self-transitions
-    // inside one grace window (e.g. spamming W while moving: IDLE->PARRYING
-    // then PARRYING->GCD on timeout) advances _prevState each time, so a
-    // packet that was in flight before EITHER transition no longer matches
-    // and got treated as a real correction — snapping state back to a stale
-    // IDLE and yanking position toward its stale x/y every other packet
-    // (visible as rubber-banding, and the parry pose never got to show
-    // before being reverted). Every *actually* external event this window
-    // was meant to protect against (being stunned/killed by someone else)
-    // already forces adopt() via externallyCaused/diedOrRespawned below
-    // regardless of trustPrediction, so this doesn't need its own check.
-    const recentSelfTransition = !this._selfTransitionConsumed && now() - this._selfTransitionAt < SELF_TRANSITION_GRACE_MS;
+    // Trust our own prediction for EVERY snapshot that lands within the
+    // grace window after a self-transition, not just the first one. Stale,
+    // still-in-flight packets from before the transition often arrive in a
+    // burst of two or more (not just one), and used to be forgiven only
+    // once — the second stale packet was treated as a real correction,
+    // snapping state/position back to it, and then the next (actually
+    // current) packet snapped forward again: visible as rubber-banding,
+    // with the parry pose never getting to stay on screen. There's no
+    // safety loss in trusting the whole window: every *actually* external
+    // event it needs to not swallow (being stunned/killed by someone else)
+    // already forces adopt() via externallyCaused/diedOrRespawned below,
+    // independent of trustPrediction.
+    const recentSelfTransition = now() - this._selfTransitionAt < SELF_TRANSITION_GRACE_MS;
     const trustPrediction = recentSelfTransition && !externallyCaused && !diedOrRespawned;
-    if (trustPrediction) this._selfTransitionConsumed = true;
 
-    if (diedOrRespawned || externallyCaused || farAway || (categoryMismatch && !trustPrediction)) {
+    if (diedOrRespawned || externallyCaused || (farAway && !trustPrediction) || (categoryMismatch && !trustPrediction)) {
       if (DEBUG) {
         const reason = diedOrRespawned
           ? "diedOrRespawned"
