@@ -1,4 +1,4 @@
-import { PLAYER, Q_DASH, E_KICK, STATES } from "../config/constants.js";
+import { PLAYER, STATES, classSkills } from "../config/constants.js";
 import Sfx from "../audio/Sfx.js";
 
 // Visual-only counterpart to Combatant.js for the Phase 2/3 networked
@@ -39,6 +39,7 @@ export default class NetFighter {
     this.container.add([this.kickCone, this.auraRing, this.figure, this.nicknameLabel]);
 
     this._clock = 0;
+    this._skills = classSkills(undefined); // re-resolved per snapshot's classId in sync()
     this._prevState = null;
     this._sinceStateMs = 0;
     this._lastX = 0;
@@ -77,6 +78,7 @@ export default class NetFighter {
   sync(snapshot, dtMs) {
     const { x, y, angle, state, chargeTime, stunTimer, isAlive } = snapshot;
     this._clock += dtMs;
+    this._skills = classSkills(snapshot.classId);
 
     const prevState = this._prevState;
     if (state !== prevState) {
@@ -140,7 +142,7 @@ export default class NetFighter {
       return;
     }
 
-    if (state === STATES.CHARGING && chargeTime >= Q_DASH.MAX_CHARGE_MS) {
+    if (state === STATES.CHARGING && chargeTime >= this._skills.qDash.MAX_CHARGE_MS) {
       if (!this._chargeReadyPlayed) {
         this._chargeReadyPlayed = true;
         Sfx.chargeReady();
@@ -477,7 +479,7 @@ export default class NetFighter {
 
     switch (state) {
       case STATES.CHARGING: {
-        const ratio = chargeTime / Q_DASH.MAX_CHARGE_MS;
+        const ratio = chargeTime / this._skills.qDash.MAX_CHARGE_MS;
         grip = { x: lerp(-r * 0.1, r * 0.55, ratio), y: lerp(-r * 0.3, -r * 0.1, ratio) };
         tip = { x: lerp(-r * 1.1, r * 1.9, ratio), y: lerp(-r * 0.6, -r * 0.2, ratio) };
         footL = { x: -r * 0.85, y: -r * 0.7 };
@@ -503,12 +505,13 @@ export default class NetFighter {
         tip = { x: -r * 1.0, y: r * 0.55 };
         footL = { x: -r * 0.4, y: -r * 0.3 };
         const elapsed = this._sinceStateMs;
-        if (elapsed <= E_KICK.ACTIVE_MS) {
-          const t = Phaser.Math.Clamp(elapsed / E_KICK.ACTIVE_MS, 0, 1);
+        const eKickPose = this._skills.eKick;
+        if (elapsed <= eKickPose.ACTIVE_MS) {
+          const t = Phaser.Math.Clamp(elapsed / eKickPose.ACTIVE_MS, 0, 1);
           footR = { x: lerp(-r * 0.15, r * 1.5, t), y: lerp(r * 0.55, 0, t) };
         } else {
           const t = Phaser.Math.Clamp(
-            (elapsed - E_KICK.ACTIVE_MS) / (E_KICK.TOTAL_MS - E_KICK.ACTIVE_MS),
+            (elapsed - eKickPose.ACTIVE_MS) / (eKickPose.TOTAL_MS - eKickPose.ACTIVE_MS),
             0,
             1
           );
@@ -586,27 +589,24 @@ export default class NetFighter {
     this.kickCone.clear();
     if (state !== STATES.KICKING) return;
 
-    const halfAngle = Phaser.Math.DegToRad(E_KICK.HALF_ANGLE_DEG);
+    const eKick = this._skills.eKick;
+    const halfAngle = Phaser.Math.DegToRad(eKick.HALF_ANGLE_DEG);
     const elapsed = this._sinceStateMs;
 
-    if (elapsed <= E_KICK.ACTIVE_MS) {
-      const t = Phaser.Math.Clamp(elapsed / E_KICK.ACTIVE_MS, 0, 1);
+    if (elapsed <= eKick.ACTIVE_MS) {
+      const t = Phaser.Math.Clamp(elapsed / eKick.ACTIVE_MS, 0, 1);
       const sweepEnd = Phaser.Math.Linear(-halfAngle, halfAngle, t);
       this.kickCone.fillStyle(0xfff3b0, 0.75);
-      this.kickCone.slice(0, 0, E_KICK.RANGE, -halfAngle, sweepEnd, false);
+      this.kickCone.slice(0, 0, eKick.RANGE, -halfAngle, sweepEnd, false);
       this.kickCone.fillPath();
       this.kickCone.lineStyle(3, 0xffcc33, 0.9);
       this.kickCone.beginPath();
-      this.kickCone.arc(0, 0, E_KICK.RANGE, -halfAngle, sweepEnd, false);
+      this.kickCone.arc(0, 0, eKick.RANGE, -halfAngle, sweepEnd, false);
       this.kickCone.strokePath();
     } else {
-      const t = Phaser.Math.Clamp(
-        (elapsed - E_KICK.ACTIVE_MS) / (E_KICK.TOTAL_MS - E_KICK.ACTIVE_MS),
-        0,
-        1
-      );
+      const t = Phaser.Math.Clamp((elapsed - eKick.ACTIVE_MS) / (eKick.TOTAL_MS - eKick.ACTIVE_MS), 0, 1);
       this.kickCone.fillStyle(0xffcc33, 0.35 * (1 - t));
-      this.kickCone.slice(0, 0, E_KICK.RANGE, -halfAngle, halfAngle, false);
+      this.kickCone.slice(0, 0, eKick.RANGE, -halfAngle, halfAngle, false);
       this.kickCone.fillPath();
     }
   }
@@ -616,7 +616,7 @@ export default class NetFighter {
     const r = PLAYER.RADIUS;
 
     if (state === STATES.CHARGING) {
-      const ratio = chargeTime / Q_DASH.MAX_CHARGE_MS;
+      const ratio = chargeTime / this._skills.qDash.MAX_CHARGE_MS;
       const pulse = 1 + 0.08 * Math.sin(this._clock * 0.02);
       this.auraRing.lineStyle(4, 0xff9f43, 0.9);
       this.auraRing.beginPath();

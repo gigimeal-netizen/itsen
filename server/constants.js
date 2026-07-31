@@ -4,6 +4,42 @@
 // matching the single-player ArenaScene.
 // Keep these numbers in sync with the client's constants.js by hand; there's
 // no shared module between the CommonJS server and the client's ES modules.
+const STUN_DURATION_MS = 2000;
+
+// Per-class Q/W/E tuning — Stage 1 of the multi-class work only has the one
+// existing class ("swordsman"), with its values unchanged from before this
+// table existed. Every skill-logic read site (ArenaRoom, and the client's
+// PredictedSelf.js/NetFighter.js) looks these up via classSkills(classId)
+// instead of the bare Q_DASH/W_PARRY/E_KICK exports below, which now just
+// alias this table's one entry so nothing else has to change in this pass.
+const CLASSES = {
+  swordsman: {
+    id: "swordsman",
+    qDash: {
+      MAX_CHARGE_MS: 1200,
+      MIN_DISTANCE: 140,
+      MAX_DISTANCE: 520,
+      SPEED: 1500,
+    },
+    wParry: {
+      DURATION_MS: 500,
+    },
+    eKick: {
+      RANGE: 70,
+      HALF_ANGLE_DEG: 60,
+      STUN_MS: STUN_DURATION_MS,
+      KNOCKBACK_DISTANCE: 90,
+      KNOCKBACK_SPEED: 900,
+      ACTIVE_MS: 120,
+      TOTAL_MS: 260,
+    },
+  },
+};
+const DEFAULT_CLASS_ID = "swordsman";
+function classSkills(classId) {
+  return CLASSES[classId] || CLASSES[DEFAULT_CLASS_ID];
+}
+
 module.exports = {
   ARENA_WIDTH: 2400,
   ARENA_HEIGHT: 1500,
@@ -13,30 +49,20 @@ module.exports = {
   CHARGE_SPEED_FACTOR: 0.05,
 
   GLOBAL_COOLDOWN_MS: 750,
-  STUN_DURATION_MS: 2000,
+  STUN_DURATION_MS,
   FAILED_PARRY_GCD_MULTIPLIER: 1.6,
   RESPAWN_DELAY_MS: 1500,
+  // How long after being knocked back a player's death still counts as a
+  // kill for whoever pushed them (ring-out/pit only need this — a direct
+  // skill-kill like Q already knows its own killer with no window needed).
+  KNOCKBACK_ATTRIBUTION_MS: 3000,
 
-  Q_DASH: {
-    MAX_CHARGE_MS: 1200,
-    MIN_DISTANCE: 140,
-    MAX_DISTANCE: 520,
-    SPEED: 1500,
-  },
-
-  W_PARRY: {
-    DURATION_MS: 500,
-  },
-
-  E_KICK: {
-    RANGE: 70,
-    HALF_ANGLE_DEG: 60,
-    STUN_MS: 2000,
-    KNOCKBACK_DISTANCE: 90,
-    KNOCKBACK_SPEED: 900,
-    ACTIVE_MS: 120,
-    TOTAL_MS: 260,
-  },
+  CLASSES,
+  DEFAULT_CLASS_ID,
+  classSkills,
+  Q_DASH: CLASSES.swordsman.qDash,
+  W_PARRY: CLASSES.swordsman.wParry,
+  E_KICK: CLASSES.swordsman.eKick,
 
   STATES: {
     IDLE: "IDLE",

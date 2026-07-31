@@ -25,9 +25,8 @@ import {
   FLOOR_CORNER_CUT,
   PLAYER,
   STATES,
-  E_KICK,
-  Q_DASH,
   NET_COUNTDOWN_MS,
+  classSkills,
 } from "../config/constants.js";
 import NetFighter from "../net/NetFighter.js";
 import PredictedSelf from "../net/PredictedSelf.js";
@@ -624,7 +623,7 @@ export default class NetArenaScene extends Phaser.Scene {
     if (sessionId === this.mySessionId) {
       if (snap.state === STATES.CHARGING) {
         if (prev.state !== STATES.CHARGING) Sfx.chargeLoopStart();
-        Sfx.chargeLoopUpdate(snap.chargeTime / Q_DASH.MAX_CHARGE_MS);
+        Sfx.chargeLoopUpdate(snap.chargeTime / classSkills(snap.classId).qDash.MAX_CHARGE_MS);
       } else if (prev.state === STATES.CHARGING) {
         Sfx.chargeLoopStop();
       }
@@ -706,11 +705,12 @@ export default class NetArenaScene extends Phaser.Scene {
   // cue. Fires at most once per KICKING instance via _kickHitFlags.
   _checkKickHit(kickerId, kicker) {
     if (!this._latestSnapshots) return;
-    const halfAngle = Phaser.Math.DegToRad(E_KICK.HALF_ANGLE_DEG);
+    const eKick = classSkills(kicker.classId).eKick;
+    const halfAngle = Phaser.Math.DegToRad(eKick.HALF_ANGLE_DEG);
     for (const [otherId, other] of this._latestSnapshots.entries()) {
       if (otherId === kickerId || !other.isAlive) continue;
       const dist = Math.hypot(kicker.x - other.x, kicker.y - other.y);
-      if (dist > E_KICK.RANGE + PLAYER.RADIUS) continue;
+      if (dist > eKick.RANGE + PLAYER.RADIUS) continue;
       const angleToTarget = Math.atan2(other.y - kicker.y, other.x - kicker.x);
       const diff = Phaser.Math.Angle.Wrap(angleToTarget - kicker.angle);
       if (Math.abs(diff) > halfAngle) continue;

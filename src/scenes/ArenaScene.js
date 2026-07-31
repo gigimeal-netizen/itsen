@@ -1,8 +1,6 @@
 import {
   ARENA,
   STATES,
-  E_KICK,
-  Q_DASH,
   GLOBAL_COOLDOWN_MS,
   RING_OUT_MARGIN,
   FLOOR_CORNER_CUT,
@@ -607,13 +605,14 @@ export default class ArenaScene extends Phaser.Scene {
   }
 
   _checkKicks() {
-    const halfAngle = Phaser.Math.DegToRad(E_KICK.HALF_ANGLE_DEG);
     for (const kicker of this.combatants) {
       if (!kicker.isKickActive) continue;
+      const eKick = kicker.skills.eKick;
+      const halfAngle = Phaser.Math.DegToRad(eKick.HALF_ANGLE_DEG);
       for (const target of this.combatants) {
         if (target === kicker || !target.isAlive) continue;
         const dist = Phaser.Math.Distance.Between(kicker.x, kicker.y, target.x, target.y);
-        if (dist > E_KICK.RANGE + target.radius) continue;
+        if (dist > eKick.RANGE + target.radius) continue;
         const angleToTarget = Phaser.Math.Angle.Between(kicker.x, kicker.y, target.x, target.y);
         const diff = Phaser.Math.Angle.Wrap(angleToTarget - kicker.facing);
         if (Math.abs(diff) > halfAngle) continue;
@@ -621,8 +620,8 @@ export default class ArenaScene extends Phaser.Scene {
         // Only kicking through a parry (E beating W) stuns; a plain hit on
         // anyone else is knockback-only per the requested balance change.
         const counteredParry = target.state === STATES.PARRYING;
-        if (counteredParry) target.applyStun(E_KICK.STUN_MS);
-        target.applyKnockback(kicker.facing, E_KICK.KNOCKBACK_DISTANCE, E_KICK.KNOCKBACK_SPEED);
+        if (counteredParry) target.applyStun(eKick.STUN_MS);
+        target.applyKnockback(kicker.facing, eKick.KNOCKBACK_DISTANCE, eKick.KNOCKBACK_SPEED);
         kicker.markKickApplied(counteredParry);
 
         if (counteredParry) {
@@ -660,7 +659,7 @@ export default class ArenaScene extends Phaser.Scene {
       Q: stunned
         ? STUN_FILL
         : p.state === STATES.CHARGING
-        ? { pct: (p.chargeTime / Q_DASH.MAX_CHARGE_MS) * 100, color: "#ff9f43", active: true }
+        ? { pct: (p.chargeTime / p.skills.qDash.MAX_CHARGE_MS) * 100, color: "#ff9f43", active: true }
         : p.state === STATES.DASH
         ? { pct: 100, color: "#ff9f43", active: true }
         : p.state === STATES.GCD

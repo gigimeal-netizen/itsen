@@ -19,9 +19,15 @@ npm start     # node index.js — listens on ws://localhost:2567 (or $PORT)
   versa. Also owns hit detection (`checkDashHits`, `checkKicks`), hazard checks (`checkPitDeaths`,
   `checkRingOuts`), and the match/countdown flow (`startCountdown`, `_respawnAllAndCountdown`).
 - **`schema/ArenaRoomState.js`** — the `@colyseus/schema` state synced to clients (flat per-player
-  schema: id/x/y/angle/state/chargeTime/stunTimer/globalCooldown/isAlive, per spec §6.2).
+  schema; see the file's own comment for the current field list, it drifts from spec §6.2's original
+  list as features get added — most recently `classId`, see below).
 - **`constants.js`** — hand-kept-in-sync copy of `../src/config/constants.js`'s tuning values (CommonJS,
-  can't `import` the client's ES module version). Edit both when changing a shared value.
+  can't `import` the client's ES module version). Edit both when changing a shared value. Q/W/E tuning
+  (`Q_DASH`/`W_PARRY`/`E_KICK`) now lives per-class in a `CLASSES` table, looked up via `classSkills(classId)`
+  — today there's only one class ("swordsman"), and the bare `Q_DASH`/`W_PARRY`/`E_KICK` exports just alias
+  its entry so most call sites are unaffected; skill-logic code (`ArenaRoom.js`,
+  `../src/net/PredictedSelf.js`, `../src/net/NetFighter.js`, `../src/entities/Combatant.js`) reads through
+  `classSkills(player.classId)` instead of the bare constants so a second class only needs a new table entry.
 - **`layoutGenerator.js`** — hand-kept-in-sync CommonJS twin of `../src/config/layoutGenerator.js`
   (symmetric arena hazard layout).
 - **`Dockerfile`** / **`.dockerignore`** / **`.env.example`** — deploy scaffolding; port comes from

@@ -31,6 +31,15 @@ function sanitizeColorIndex(raw, fallback) {
   return Number.isInteger(n) && n >= 0 && n < COLOR_COUNT ? n : fallback;
 }
 
+// Stage 1 of the multi-class work: only "swordsman" exists, so this always
+// falls back to it — no client UI sends a classId option yet. Mirrors
+// sanitizeColorIndex()'s shape so a future class-select screen slots in the
+// same way the color picker did.
+const CLASS_IDS = Object.keys(C.CLASSES);
+function sanitizeClassId(raw, fallback) {
+  return typeof raw === "string" && CLASS_IDS.includes(raw) ? raw : fallback;
+}
+
 // Two players picking the same nickname would make the scoreboard/kill-flash
 // text ambiguous (e.g. "철수 5 · 철수 3") even though their color still tells
 // them apart in-game — so a joiner whose nickname collides with someone
@@ -231,6 +240,7 @@ class ArenaRoom extends Room {
     player.isAlive = true;
     player.score = 0;
     player.lastInputSeq = 0;
+    player.classId = sanitizeClassId(options?.classId, C.DEFAULT_CLASS_ID);
     player.colorIndex = sanitizeColorIndex(options?.colorIndex, index % COLOR_COUNT);
     const existingNicknames = new Set([...this.state.players.values()].map((p) => p.nickname));
     player.nickname = dedupeNickname(sanitizeNickname(options?.nickname), existingNicknames);
@@ -451,6 +461,7 @@ class ArenaRoom extends Room {
     player.globalCooldown = 0;
     s.dash = null;
     s.knockback = null;
+    s.lastKnockedBackBy = null;
     // A W/E press latched in onMessage("input") right before death (or any
     // time while dead — the client keeps sending input, tryStartSkills()
     // just never runs for a dead player to consume it) would otherwise
@@ -488,11 +499,23 @@ class ArenaRoom extends Room {
     return false;
   }
 
+  // If this player was knocked back recently enough, credit the pusher for
+  // whatever kills them next (ring-out/pit) instead of crediting no one —
+  // bounded to a short window so an old, unrelated knockback doesn't wrongly
+  // credit a much-later death the player caused themselves.
+  _recentKnockbackAttacker(s) {
+    if (s.lastKnockedBackBy && Date.now() - s.lastKnockedBackAt <= C.KNOCKBACK_ATTRIBUTION_MS) {
+      return s.lastKnockedBackBy;
+    }
+    return null;
+  }
+
   checkRingOuts() {
     for (const [sessionId, player] of this.state.players.entries()) {
       if (!player.isAlive) continue;
       if (!this.isInsideFloor(player.x, player.y)) {
-        this.kill(player, this.scratch.get(sessionId));
+        const s = this.scratch.get(sessionId);
+        this.kill(player, s, this._recentKnockbackAttacker(s));
       }
     }
   }
@@ -506,7 +529,8 @@ class ArenaRoom extends Room {
         const halfW = p.w / 2;
         const halfH = p.h / 2;
         if (player.x >= p.x - halfW && player.x <= p.x + halfW && player.y >= p.y - halfH && player.y <= p.y + halfH) {
-          this.kill(player, this.scratch.get(sessionId));
+          const s = this.scratch.get(sessionId);
+          this.kill(player, s, this._recentKnockbackAttacker(s));
           break;
         }
       }
@@ -588,14 +612,14 @@ class ArenaRoom extends Room {
     if (s.wPressed) {
       s.wPressed = false;
       player.state = C.STATES.PARRYING;
-      s.stateTimer = C.W_PARRY.DURATION_MS;
+      s.stateTimer = C.classSkills(player.classId).wParry.DURATION_MS;
       s.parrySuccess = false;
       return;
     }
     if (s.ePressed) {
       s.ePressed = false;
       player.state = C.STATES.KICKING;
-      s.stateTimer = C.E_KICK.TOTAL_MS;
+      s.stateTimer = C.classSkills(player.classId).eKick.TOTAL_MS;
       s.kickHitApplied = false;
       s.kickCounteredParry = false;
     }
@@ -613,11 +637,12 @@ class ArenaRoom extends Room {
         player.y = ny;
       }
     }
-    player.chargeTime = Math.min(player.chargeTime + dtMs, C.Q_DASH.MAX_CHARGE_MS);
+    const qDash = C.classSkills(player.classId).qDash;
+    player.chargeTime = Math.min(player.chargeTime + dtMs, qDash.MAX_CHARGE_MS);
 
     if (!s.qHeld) {
-      const ratio = player.chargeTime / C.Q_DASH.MAX_CHARGE_MS;
-      const distance = C.Q_DASH.MIN_DISTANCE + (C.Q_DASH.MAX_DISTANCE - C.Q_DASH.MIN_DISTANCE) * ratio;
+      const ratio = player.chargeTime / qDash.MAX_CHARGE_MS;
+      const distance = qDash.MIN_DISTANCE + (qDash.MAX_DISTANCE - qDash.MIN_DISTANCE) * ratio;
       s.dash = { dx: Math.cos(player.angle), dy: Math.sin(player.angle), remaining: distance };
       s.dashKilled = false;
       player.state = C.STATES.DASH;
@@ -633,7 +658,7 @@ class ArenaRoom extends Room {
       this.enterGCD(player, 1);
       return;
     }
-    const totalStep = Math.min((C.Q_DASH.SPEED * dtMs) / 1000, s.dash.remaining);
+    const totalStep = Math.min((C.classSkills(player.classId).qDash.SPEED * dtMs) / 1000, s.dash.remaining);
     const subSteps = Math.max(1, Math.ceil(totalStep / 8));
     const perStep = totalStep / subSteps;
     let stoppedByWall = false;
@@ -680,7 +705,11 @@ class ArenaRoom extends Room {
     player.stunTimer = durationMs;
   }
 
-  applyKnockback(player, s, fromAngle, distance, speed) {
+  // sourceSessionId: who caused this knockback, if anyone — stamped onto the
+  // target's scratch so a later ring-out/pit death (checkRingOuts/
+  // checkPitDeaths) can credit the pusher instead of crediting no one, the
+  // same way a direct dash kill already credits the dasher.
+  applyKnockback(player, s, fromAngle, distance, speed, sourceSessionId = null) {
     if (!player.isAlive) return;
     s.knockback = {
       dx: Math.cos(fromAngle),
@@ -688,6 +717,8 @@ class ArenaRoom extends Room {
       remainingMs: (distance / speed) * 1000,
       speed,
     };
+    s.lastKnockedBackBy = sourceSessionId;
+    s.lastKnockedBackAt = Date.now();
   }
 
   kill(target, ts, killerSessionId = null) {
@@ -745,29 +776,30 @@ class ArenaRoom extends Room {
   // E only stuns when it counters a parry (beats W); a plain hit on anyone
   // else is knockback-only, matching the single-player balance change.
   checkKicks() {
-    const halfAngle = (C.E_KICK.HALF_ANGLE_DEG * Math.PI) / 180;
     const entries = [...this.state.players.entries()];
     for (const [kickerId, kicker] of entries) {
       const ks = this.scratch.get(kickerId);
+      const eKick = C.classSkills(kicker.classId).eKick;
       const active =
         kicker.state === C.STATES.KICKING &&
         !ks.kickHitApplied &&
-        ks.stateTimer <= C.E_KICK.TOTAL_MS &&
-        ks.stateTimer > C.E_KICK.TOTAL_MS - C.E_KICK.ACTIVE_MS;
+        ks.stateTimer <= eKick.TOTAL_MS &&
+        ks.stateTimer > eKick.TOTAL_MS - eKick.ACTIVE_MS;
       if (!active) continue;
+      const halfAngle = (eKick.HALF_ANGLE_DEG * Math.PI) / 180;
 
       for (const [targetId, target] of entries) {
         if (targetId === kickerId || !target.isAlive) continue;
         const dist = Math.hypot(kicker.x - target.x, kicker.y - target.y);
-        if (dist > C.E_KICK.RANGE + C.PLAYER_RADIUS) continue;
+        if (dist > eKick.RANGE + C.PLAYER_RADIUS) continue;
         const angleToTarget = Math.atan2(target.y - kicker.y, target.x - kicker.x);
         const diff = angleWrap(angleToTarget - kicker.angle);
         if (Math.abs(diff) > halfAngle) continue;
 
         const ts = this.scratch.get(targetId);
         const counteredParry = target.state === C.STATES.PARRYING;
-        if (counteredParry) this.applyStun(target, ts, C.E_KICK.STUN_MS);
-        this.applyKnockback(target, ts, kicker.angle, C.E_KICK.KNOCKBACK_DISTANCE, C.E_KICK.KNOCKBACK_SPEED);
+        if (counteredParry) this.applyStun(target, ts, eKick.STUN_MS);
+        this.applyKnockback(target, ts, kicker.angle, eKick.KNOCKBACK_DISTANCE, eKick.KNOCKBACK_SPEED, kickerId);
         ks.kickHitApplied = true;
         ks.kickCounteredParry = counteredParry;
       }

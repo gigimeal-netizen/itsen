@@ -2,14 +2,13 @@ import {
   PLAYER,
   GLOBAL_COOLDOWN_MS,
   STUN_DURATION_MS,
-  Q_DASH,
-  W_PARRY,
-  E_KICK,
   SLOW_ZONE_FACTOR,
   RESPAWN_DELAY_MS,
   WALL_STUN_MS,
   FAILED_PARRY_GCD_MULTIPLIER,
   STATES,
+  DEFAULT_CLASS_ID,
+  classSkills,
 } from "../config/constants.js";
 import Sfx from "../audio/Sfx.js";
 
@@ -28,6 +27,13 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this.color = color;
     this.spawnX = x;
     this.spawnY = y;
+    // Fixed for this Combatant's lifetime — single-player has no
+    // class-select UI yet, so this always resolves to the one existing
+    // class, but every skill-tuning read below goes through this.skills
+    // instead of a bare constant so a future class only needs a new
+    // CLASSES entry, not new read sites.
+    this.classId = DEFAULT_CLASS_ID;
+    this.skills = classSkills(this.classId);
     this._respawnClock = 0; // ms remaining until respawn(), only ticks while dead
     // Shadow lives OUTSIDE the container (it must not inherit facing rotation —
     // a rotating shadow reads as swinging around the character instead of
@@ -291,7 +297,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     }
     if (this.wPressed) {
       this.setState(STATES.PARRYING);
-      this.stateTimer = W_PARRY.DURATION_MS;
+      this.stateTimer = this.skills.wParry.DURATION_MS;
       this._parrySuccess = false;
       this.body.setVelocity(0, 0);
       Sfx.parryStance();
@@ -299,7 +305,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     }
     if (this.ePressed) {
       this.setState(STATES.KICKING);
-      this.stateTimer = E_KICK.TOTAL_MS;
+      this.stateTimer = this.skills.eKick.TOTAL_MS;
       this._kickHitApplied = false;
       this._kickCounteredParry = false;
       this.body.setVelocity(0, 0);
@@ -317,14 +323,15 @@ export default class Combatant extends Phaser.GameObjects.Container {
       this.body.setVelocity(0, 0);
     }
 
-    this.chargeTime = Math.min(this.chargeTime + dtMs, Q_DASH.MAX_CHARGE_MS);
-    Sfx.chargeLoopUpdate(this.chargeTime / Q_DASH.MAX_CHARGE_MS);
+    const qDash = this.skills.qDash;
+    this.chargeTime = Math.min(this.chargeTime + dtMs, qDash.MAX_CHARGE_MS);
+    Sfx.chargeLoopUpdate(this.chargeTime / qDash.MAX_CHARGE_MS);
 
     // Charge maxed out (holding past the point it can go any further) —
     // a one-shot "ready" sound plus a sparkle glint every ~70ms around the
     // character telegraphs "fully charged, ready to release" beyond just
     // the aura ring filling.
-    if (this.chargeTime >= Q_DASH.MAX_CHARGE_MS) {
+    if (this.chargeTime >= qDash.MAX_CHARGE_MS) {
       if (!this._chargeReadyPlayed) {
         this._chargeReadyPlayed = true;
         Sfx.chargeReady();
@@ -366,8 +373,9 @@ export default class Combatant extends Phaser.GameObjects.Container {
   }
 
   _releaseDash() {
-    const ratio = this.chargeTime / Q_DASH.MAX_CHARGE_MS;
-    const distance = Q_DASH.MIN_DISTANCE + (Q_DASH.MAX_DISTANCE - Q_DASH.MIN_DISTANCE) * ratio;
+    const qDash = this.skills.qDash;
+    const ratio = this.chargeTime / qDash.MAX_CHARGE_MS;
+    const distance = qDash.MIN_DISTANCE + (qDash.MAX_DISTANCE - qDash.MIN_DISTANCE) * ratio;
     this._dash = {
       dx: Math.cos(this.facing),
       dy: Math.sin(this.facing),
@@ -439,9 +447,9 @@ export default class Combatant extends Phaser.GameObjects.Container {
       this.enterGCD();
       return;
     }
-    const step = (Q_DASH.SPEED * dtMs) / 1000;
+    const step = (this.skills.qDash.SPEED * dtMs) / 1000;
     const travel = Math.min(step, this._dash.remaining);
-    this.body.setVelocity(this._dash.dx * Q_DASH.SPEED, this._dash.dy * Q_DASH.SPEED);
+    this.body.setVelocity(this._dash.dx * this.skills.qDash.SPEED, this._dash.dy * this.skills.qDash.SPEED);
     this._dash.remaining -= travel;
 
     if (this._dash.remaining <= 0) {
@@ -523,11 +531,12 @@ export default class Combatant extends Phaser.GameObjects.Container {
   }
 
   get isKickActive() {
+    const eKick = this.skills.eKick;
     return (
       this.state === STATES.KICKING &&
       !this._kickHitApplied &&
-      this.stateTimer <= E_KICK.TOTAL_MS &&
-      this.stateTimer > E_KICK.TOTAL_MS - E_KICK.ACTIVE_MS
+      this.stateTimer <= eKick.TOTAL_MS &&
+      this.stateTimer > eKick.TOTAL_MS - eKick.ACTIVE_MS
     );
   }
 
@@ -542,30 +551,27 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this.kickCone.clear();
     if (this.state !== STATES.KICKING) return;
 
-    const halfAngle = Phaser.Math.DegToRad(E_KICK.HALF_ANGLE_DEG);
-    const elapsed = E_KICK.TOTAL_MS - this.stateTimer;
+    const eKick = this.skills.eKick;
+    const halfAngle = Phaser.Math.DegToRad(eKick.HALF_ANGLE_DEG);
+    const elapsed = eKick.TOTAL_MS - this.stateTimer;
 
-    if (elapsed <= E_KICK.ACTIVE_MS) {
+    if (elapsed <= eKick.ACTIVE_MS) {
       // Swipe: the cone sweeps left-to-right across the active window instead
       // of just appearing, so the kick reads as a strike rather than a stamp.
-      const t = Phaser.Math.Clamp(elapsed / E_KICK.ACTIVE_MS, 0, 1);
+      const t = Phaser.Math.Clamp(elapsed / eKick.ACTIVE_MS, 0, 1);
       const sweepEnd = Phaser.Math.Linear(-halfAngle, halfAngle, t);
       this.kickCone.fillStyle(0xfff3b0, 0.75);
-      this.kickCone.slice(0, 0, E_KICK.RANGE, -halfAngle, sweepEnd, false);
+      this.kickCone.slice(0, 0, eKick.RANGE, -halfAngle, sweepEnd, false);
       this.kickCone.fillPath();
       this.kickCone.lineStyle(3, 0xffcc33, 0.9);
       this.kickCone.beginPath();
-      this.kickCone.arc(0, 0, E_KICK.RANGE, -halfAngle, sweepEnd, false);
+      this.kickCone.arc(0, 0, eKick.RANGE, -halfAngle, sweepEnd, false);
       this.kickCone.strokePath();
     } else {
       // Recovery: cone fades out from full brightness.
-      const t = Phaser.Math.Clamp(
-        (elapsed - E_KICK.ACTIVE_MS) / (E_KICK.TOTAL_MS - E_KICK.ACTIVE_MS),
-        0,
-        1
-      );
+      const t = Phaser.Math.Clamp((elapsed - eKick.ACTIVE_MS) / (eKick.TOTAL_MS - eKick.ACTIVE_MS), 0, 1);
       this.kickCone.fillStyle(0xffcc33, 0.35 * (1 - t));
-      this.kickCone.slice(0, 0, E_KICK.RANGE, -halfAngle, halfAngle, false);
+      this.kickCone.slice(0, 0, eKick.RANGE, -halfAngle, halfAngle, false);
       this.kickCone.fillPath();
     }
   }
@@ -575,7 +581,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     const r = PLAYER.RADIUS;
 
     if (this.state === STATES.CHARGING) {
-      const ratio = this.chargeTime / Q_DASH.MAX_CHARGE_MS;
+      const ratio = this.chargeTime / this.skills.qDash.MAX_CHARGE_MS;
       const pulse = 1 + 0.08 * Math.sin(this._clock * 0.02);
       this.auraRing.lineStyle(4, 0xff9f43, 0.9);
       this.auraRing.beginPath();
@@ -613,7 +619,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
 
     switch (this.state) {
       case STATES.CHARGING: {
-        const ratio = this.chargeTime / Q_DASH.MAX_CHARGE_MS;
+        const ratio = this.chargeTime / this.skills.qDash.MAX_CHARGE_MS;
         grip = { x: lerp(-r * 0.1, r * 0.55, ratio), y: lerp(-r * 0.3, -r * 0.1, ratio) };
         tip = { x: lerp(-r * 1.1, r * 1.9, ratio), y: lerp(-r * 0.6, -r * 0.2, ratio) };
         footL = { x: -r * 0.85, y: -r * 0.7 };
@@ -638,16 +644,13 @@ export default class Combatant extends Phaser.GameObjects.Container {
         grip = { x: -r * 0.25, y: r * 0.25 };
         tip = { x: -r * 1.0, y: r * 0.55 };
         footL = { x: -r * 0.4, y: -r * 0.3 };
-        const elapsed = E_KICK.TOTAL_MS - this.stateTimer;
-        if (elapsed <= E_KICK.ACTIVE_MS) {
-          const t = Phaser.Math.Clamp(elapsed / E_KICK.ACTIVE_MS, 0, 1);
+        const eKickPose = this.skills.eKick;
+        const elapsed = eKickPose.TOTAL_MS - this.stateTimer;
+        if (elapsed <= eKickPose.ACTIVE_MS) {
+          const t = Phaser.Math.Clamp(elapsed / eKickPose.ACTIVE_MS, 0, 1);
           footR = { x: lerp(-r * 0.15, r * 1.5, t), y: lerp(r * 0.55, 0, t) };
         } else {
-          const t = Phaser.Math.Clamp(
-            (elapsed - E_KICK.ACTIVE_MS) / (E_KICK.TOTAL_MS - E_KICK.ACTIVE_MS),
-            0,
-            1
-          );
+          const t = Phaser.Math.Clamp((elapsed - eKickPose.ACTIVE_MS) / (eKickPose.TOTAL_MS - eKickPose.ACTIVE_MS), 0, 1);
           footR = { x: lerp(r * 1.5, -r * 0.3, t), y: lerp(0, r * 0.3, t) };
         }
         break;

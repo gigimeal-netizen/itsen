@@ -1,4 +1,4 @@
-import { PLAYER, Q_DASH, SLOW_ZONE_FACTOR, STATES } from "../config/constants.js";
+import { PLAYER, SLOW_ZONE_FACTOR, STATES, classSkills } from "../config/constants.js";
 
 // Client-side prediction for the LOCAL player only — a physics/rendering-free
 // mirror of server/rooms/ArenaRoom.js's stepPlayer()/tryStartSkills() (which
@@ -38,9 +38,15 @@ export default class PredictedSelf {
     this.globalCooldown = 0;
     this.isAlive = true;
     this.score = 0;
+    this.classId = null; // set from the first snapshot in adopt() — NetFighter reads this like any other snapshot field
     this._lastLoggedState = null; // DEBUG-only, see reconcile()
 
     this._dash = null; // { dx, dy, remaining }
+    // Resolved once from the first snapshot's classId (join-time-fixed, no
+    // mid-match class change to worry about this stage) — every skill-tuning
+    // read below goes through this instead of a bare constant, so a future
+    // second class only needs a new CLASSES entry, not new read sites.
+    this._skills = classSkills(undefined);
   }
 
   // Seeds/replaces predicted state wholesale from an authoritative snapshot
@@ -57,7 +63,9 @@ export default class PredictedSelf {
     this.globalCooldown = snap.globalCooldown || 0;
     this.isAlive = snap.isAlive;
     this.score = snap.score;
+    this.classId = snap.classId;
     this._dash = null;
+    this._skills = classSkills(snap.classId);
     this.ready = true;
   }
 
@@ -134,10 +142,11 @@ export default class PredictedSelf {
     if (this._inQuicksand(hazards)) speed *= SLOW_ZONE_FACTOR;
     if (input.wantsMove) this._moveTowards(this.angle, (speed * dtMs) / 1000, hazards);
 
-    this.chargeTime = Math.min(this.chargeTime + dtMs, Q_DASH.MAX_CHARGE_MS);
+    const qDash = this._skills.qDash;
+    this.chargeTime = Math.min(this.chargeTime + dtMs, qDash.MAX_CHARGE_MS);
     if (!input.qHeld) {
-      const ratio = this.chargeTime / Q_DASH.MAX_CHARGE_MS;
-      const distance = Q_DASH.MIN_DISTANCE + (Q_DASH.MAX_DISTANCE - Q_DASH.MIN_DISTANCE) * ratio;
+      const ratio = this.chargeTime / qDash.MAX_CHARGE_MS;
+      const distance = qDash.MIN_DISTANCE + (qDash.MAX_DISTANCE - qDash.MIN_DISTANCE) * ratio;
       this._dash = { dx: Math.cos(this.angle), dy: Math.sin(this.angle), remaining: distance };
       this.state = STATES.DASH;
     }
@@ -156,7 +165,7 @@ export default class PredictedSelf {
   // until reconcile()'s next snapshot says otherwise.
   _stepDash(dtMs, hazards) {
     if (!this._dash) return;
-    const totalStep = Math.min((Q_DASH.SPEED * dtMs) / 1000, this._dash.remaining);
+    const totalStep = Math.min((this._skills.qDash.SPEED * dtMs) / 1000, this._dash.remaining);
     const subSteps = Math.max(1, Math.ceil(totalStep / MOVE_STEP_LIMIT));
     const perStep = totalStep / subSteps;
 
@@ -228,6 +237,7 @@ export default class PredictedSelf {
     this.globalCooldown = snap.globalCooldown || 0;
     this.isAlive = snap.isAlive;
     this.score = snap.score;
+    this.classId = snap.classId;
     // DASH's direction/distance (_dash) is local-only bookkeeping the
     // synced schema doesn't carry. Landing in DASH straight from a
     // snapshot (the input that triggered it already got confirmed and
@@ -237,7 +247,11 @@ export default class PredictedSelf {
     // longer self-ends on distance (see its comment), only reconcile()
     // moves us out of DASH now, same as PARRYING/KICKING.
     if (snap.state === STATES.DASH) {
-      this._dash = this._dash || { dx: Math.cos(snap.angle), dy: Math.sin(snap.angle), remaining: Q_DASH.MAX_DISTANCE };
+      this._dash = this._dash || {
+        dx: Math.cos(snap.angle),
+        dy: Math.sin(snap.angle),
+        remaining: this._skills.qDash.MAX_DISTANCE,
+      };
     } else {
       this._dash = null;
     }

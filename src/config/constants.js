@@ -97,26 +97,44 @@ export const STUN_DURATION_MS = 2000;
 export const WALL_STUN_MS = 400; // Q crashing into a wall mid-dash
 export const FAILED_PARRY_GCD_MULTIPLIER = 1.6; // W timing out with no counter
 
-export const Q_DASH = {
-  MAX_CHARGE_MS: 1200, // charge cap
-  MIN_DISTANCE: 140,
-  MAX_DISTANCE: 520,
-  SPEED: 1500, // px/s while dashing (distance / speed = dash duration)
+// Per-class Q/W/E tuning — Stage 1 of the multi-class work only has the one
+// existing class ("swordsman"), with its values unchanged from before this
+// table existed. Every skill-logic read site (Combatant.js, PredictedSelf.js,
+// NetFighter.js, NetArenaScene.js) looks these up via classSkills(classId)
+// instead of the bare Q_DASH/W_PARRY/E_KICK exports below, which now just
+// alias this table's one entry so nothing else has to change in this pass.
+// Mirrored by hand in server/constants.js (CommonJS, same shape).
+export const CLASSES = {
+  swordsman: {
+    id: "swordsman",
+    qDash: {
+      MAX_CHARGE_MS: 1200, // charge cap
+      MIN_DISTANCE: 140,
+      MAX_DISTANCE: 520,
+      SPEED: 1500, // px/s while dashing (distance / speed = dash duration)
+    },
+    wParry: {
+      DURATION_MS: 500,
+    },
+    eKick: {
+      RANGE: 70,
+      HALF_ANGLE_DEG: 60, // total cone = 120 deg
+      STUN_MS: STUN_DURATION_MS,
+      KNOCKBACK_DISTANCE: 90,
+      KNOCKBACK_SPEED: 900,
+      ACTIVE_MS: 120, // how long the kick hitbox is active (startup->active window)
+      TOTAL_MS: 260, // total animation lock before returning to IDLE/GCD
+    },
+  },
 };
+export const DEFAULT_CLASS_ID = "swordsman";
+export function classSkills(classId) {
+  return CLASSES[classId] || CLASSES[DEFAULT_CLASS_ID];
+}
 
-export const W_PARRY = {
-  DURATION_MS: 500,
-};
-
-export const E_KICK = {
-  RANGE: 70,
-  HALF_ANGLE_DEG: 60, // total cone = 120 deg
-  STUN_MS: STUN_DURATION_MS,
-  KNOCKBACK_DISTANCE: 90,
-  KNOCKBACK_SPEED: 900,
-  ACTIVE_MS: 120, // how long the kick hitbox is active (startup->active window)
-  TOTAL_MS: 260, // total animation lock before returning to IDLE/GCD
-};
+export const Q_DASH = CLASSES.swordsman.qDash;
+export const W_PARRY = CLASSES.swordsman.wParry;
+export const E_KICK = CLASSES.swordsman.eKick;
 
 export const STATES = {
   IDLE: "IDLE",
