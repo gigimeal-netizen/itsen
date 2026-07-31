@@ -59,12 +59,17 @@ export default class PredictedSelf {
 
     this._dash = null; // { dx, dy, remaining }
     this._stateTimer = 0;
-    this._selfTransitionAt = -Infinity;
+    // Every state a self-transition has left behind, each with its own
+    // expiry — see _setState()/reconcile() for why this needs to be a
+    // per-transition chain rather than one blanket "trust everything for
+    // 250ms" window.
+    this._supersededStates = []; // [{ state, until }, ...]
   }
 
   _setState(next) {
+    this._supersededStates.push({ state: this.state, until: now() + SELF_TRANSITION_GRACE_MS });
+    if (this._supersededStates.length > 8) this._supersededStates.shift();
     this.state = next;
-    this._selfTransitionAt = now();
   }
 
   // Seeds/replaces predicted state wholesale from an authoritative snapshot
@@ -83,7 +88,7 @@ export default class PredictedSelf {
     this.isAlive = snap.isAlive;
     this.score = snap.score;
     this._dash = null;
-    this._selfTransitionAt = -Infinity;
+    this._supersededStates = [];
     this.ready = true;
   }
 
@@ -256,20 +261,30 @@ export default class PredictedSelf {
     const farAway = Math.hypot(snap.x - this.x, snap.y - this.y) > PLAYER.RADIUS * 4;
     const categoryMismatch = this._category(snap.state) !== this._category(this.state);
 
-    // Trust our own prediction for EVERY snapshot that lands within the
-    // grace window after a self-transition, not just the first one. Stale,
-    // still-in-flight packets from before the transition often arrive in a
-    // burst of two or more (not just one), and used to be forgiven only
-    // once — the second stale packet was treated as a real correction,
-    // snapping state/position back to it, and then the next (actually
-    // current) packet snapped forward again: visible as rubber-banding,
-    // with the parry pose never getting to stay on screen. There's no
-    // safety loss in trusting the whole window: every *actually* external
-    // event it needs to not swallow (being stunned/killed by someone else)
-    // already forces adopt() via externallyCaused/diedOrRespawned below,
-    // independent of trustPrediction.
-    const recentSelfTransition = now() - this._selfTransitionAt < SELF_TRANSITION_GRACE_MS;
-    const trustPrediction = recentSelfTransition && !externallyCaused && !diedOrRespawned;
+    // Trust our own prediction only when the snapshot is still showing a
+    // state we ourselves have since moved past (a stale, still-in-flight
+    // packet from before one of our own transitions) — checked against the
+    // whole chain of recently-superseded states, each with its own expiry,
+    // not just the single most recent one. That's what makes chained
+    // transitions inside one burst of stale packets (e.g. spamming W while
+    // moving: IDLE->PARRYING then PARRYING->GCD) work: a packet still
+    // showing IDLE *or* PARRYING is recognized as stale either way.
+    //
+    // Two earlier, broader versions of this both failed in practice: (a)
+    // matching only the single immediately-prior state missed the second
+    // stale packet in a burst, snapping back to it and then forward again
+    // (rubber-banding); (b) trusting *any* snapshot for a flat time window
+    // after any transition also swallowed a genuinely fresh confirmation
+    // that happened to match an old category (e.g. our own next W press
+    // already confirmed PARRYING by the server, arriving just after we'd
+    // locally moved on from GCD back to IDLE) — the fresh confirmation got
+    // silently dropped instead of adopted. Matching against the exact
+    // superseded-state chain avoids both: it only ever suppresses a
+    // snapshot value we know for a fact predates our own prediction.
+    const trustPrediction =
+      !externallyCaused &&
+      !diedOrRespawned &&
+      this._supersededStates.some((s) => s.state === snap.state && now() < s.until);
 
     if (diedOrRespawned || externallyCaused || (farAway && !trustPrediction) || (categoryMismatch && !trustPrediction)) {
       if (DEBUG) {
