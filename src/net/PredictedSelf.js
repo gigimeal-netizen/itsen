@@ -36,6 +36,10 @@ const MOVE_STEP_LIMIT = 4; // px per obstacle-collision substep, mirrors the ser
 // an audible double-trigger for something that only ever happened once.
 const SELF_TRANSITION_GRACE_MS = 250;
 
+// Temporary diagnostic logging for the W-spam rubber-banding report — open
+// net.html?debugpredict to enable, remove once that's tracked down.
+const DEBUG = typeof window !== "undefined" && window.location.search.includes("debugpredict");
+
 function now() {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
@@ -95,6 +99,10 @@ export default class PredictedSelf {
     // comment) — hold still and wait for the server's next word on it.
     if (this.state === STATES.STUNNED || this.state === STATES.DEAD) return;
 
+    if (DEBUG && input.wPressed && this.state !== STATES.IDLE) {
+      console.log(`[predict] W dropped locally — state is ${this.state}, not IDLE`);
+    }
+
     switch (this.state) {
       case STATES.IDLE:
         this._moveLike(dtMs, input, PLAYER.BASE_SPEED, hazards);
@@ -144,6 +152,7 @@ export default class PredictedSelf {
       return;
     }
     if (input.wPressed) {
+      if (DEBUG) console.log(`[predict] W accepted, entering PARRYING (was ${this.state})`);
       this._setState(STATES.PARRYING);
       this._stateTimer = W_PARRY.DURATION_MS;
       return;
@@ -270,8 +279,27 @@ export default class PredictedSelf {
     if (trustPrediction) this._selfTransitionConsumed = true;
 
     if (diedOrRespawned || externallyCaused || farAway || (categoryMismatch && !trustPrediction)) {
+      if (DEBUG) {
+        const reason = diedOrRespawned
+          ? "diedOrRespawned"
+          : externallyCaused
+            ? "externallyCaused"
+            : farAway
+              ? `farAway(${Math.round(Math.hypot(snap.x - this.x, snap.y - this.y))}px)`
+              : "categoryMismatch";
+        console.log(
+          `[predict] HARD ADOPT (${reason}) predicted=${this.state} snap=${snap.state} trustPrediction=${trustPrediction} ` +
+            `predXY=(${Math.round(this.x)},${Math.round(this.y)}) snapXY=(${Math.round(snap.x)},${Math.round(snap.y)})`
+        );
+      }
       this.adopt(snap);
       return;
+    }
+    if (DEBUG && (categoryMismatch || snap.state !== this.state)) {
+      console.log(
+        `[predict] soft reconcile: predicted=${this.state} snap=${snap.state} trustPrediction=${trustPrediction} ` +
+          `categoryMismatch=${categoryMismatch}`
+      );
     }
 
     // Minor drift: ease position toward the authoritative value instead of
