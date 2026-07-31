@@ -3,9 +3,11 @@ const { Schema, MapSchema, ArraySchema, defineTypes } = require("@colyseus/schem
 // Mirrors the flat per-player schema documented in CLAUDE.md §6.2:
 // { id, x, y, angle, state, chargeTime, stunTimer, globalCooldown, isAlive }
 // plus `score` (round wins / deathmatch kills — see ArenaRoom's match-flow
-// section). Anything not in this list (dash vectors, one-shot hit flags,
-// input intent) is server-only bookkeeping and lives in ArenaRoom's
-// `scratch` map instead — it never needs to reach the client.
+// section) and `lastInputSeq` (echoes the client's own input sequence
+// numbers back for PredictedSelf's replay-based reconciliation). Anything
+// not in this list (dash vectors, one-shot hit flags, input intent) is
+// server-only bookkeeping and lives in ArenaRoom's `scratch` map instead —
+// it never needs to reach the client.
 class PlayerState extends Schema {}
 defineTypes(PlayerState, {
   id: "string",
@@ -20,6 +22,7 @@ defineTypes(PlayerState, {
   score: "number",
   colorIndex: "number", // chosen color swatch, 0..COLOR_COUNT-1 (see ArenaRoom.COLOR_COUNT) — client renders from it
   nickname: "string", // display name chosen in the lobby, shown above the fighter in-game
+  lastInputSeq: "number", // most recent client input seq this player's state reflects — see src/net/PredictedSelf.js's reconcile()
 });
 
 // A plain axis-aligned rect — reused for obstacles, pits, AND quicksand

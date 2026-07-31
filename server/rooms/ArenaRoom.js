@@ -159,6 +159,10 @@ class ArenaRoom extends Room {
       // prediction mismatch, not just the surprise fire.
       if (msg.wPressed && player && player.state === C.STATES.IDLE) s.wPressed = true;
       if (msg.ePressed && player && player.state === C.STATES.IDLE) s.ePressed = true;
+      // Echoed back to the client so PredictedSelf.reconcile() knows which
+      // of its own buffered inputs this state already reflects and can
+      // replay only what's left instead of guessing from state/timing.
+      if (player && typeof msg.seq === "number" && msg.seq > player.lastInputSeq) player.lastInputSeq = msg.seq;
     });
 
     this.setSimulationInterval((dtMs) => this.tick(dtMs), C.SIMULATION_INTERVAL_MS);
@@ -216,6 +220,7 @@ class ArenaRoom extends Room {
     player.globalCooldown = 0;
     player.isAlive = true;
     player.score = 0;
+    player.lastInputSeq = 0;
     player.colorIndex = sanitizeColorIndex(options?.colorIndex, index % COLOR_COUNT);
     const existingNicknames = new Set([...this.state.players.values()].map((p) => p.nickname));
     player.nickname = dedupeNickname(sanitizeNickname(options?.nickname), existingNicknames);

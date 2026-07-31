@@ -78,6 +78,8 @@ export default class NetArenaScene extends Phaser.Scene {
     this.hud = document.getElementById("hud");
     this.fighters = new Map(); // sessionId -> NetFighter
     this.predictedSelf = new PredictedSelf(); // see _wireRoom()/update() and PredictedSelf.js
+    this._inputSeq = 0; // incrementing id tagged on every "input" send, for PredictedSelf's replay reconciliation
+    this._pendingInputs = []; // [{ seq, dtMs, input, hazards }, ...] sent but not yet confirmed by the server
     this.room = null;
     this.mySessionId = null;
     this.isSpectator = false;
@@ -872,6 +874,8 @@ export default class NetArenaScene extends Phaser.Scene {
     for (const fighter of this.fighters.values()) fighter.destroy();
     this.fighters.clear();
     this.predictedSelf = new PredictedSelf();
+    this._inputSeq = 0;
+    this._pendingInputs = [];
     this._latestSnapshots = new Map();
     this._snapshotBuffers = new Map();
     this._prevSnap.clear();
@@ -907,6 +911,8 @@ export default class NetArenaScene extends Phaser.Scene {
     for (const fighter of this.fighters.values()) fighter.destroy();
     this.fighters.clear();
     this.predictedSelf = new PredictedSelf();
+    this._inputSeq = 0;
+    this._pendingInputs = [];
     // `this._latestSnapshots` MUST exist before any Colyseus callback can
     // fire — onAdd() fires immediately/synchronously for entries that
     // already exist in the state (e.g. our own player, present in the very
@@ -928,7 +934,7 @@ export default class NetArenaScene extends Phaser.Scene {
       $(player).onChange(() => {
         this._latestSnapshots.set(sessionId, { ...player });
         this._pushSnapshot(sessionId, player);
-        if (sessionId === this.mySessionId) this.predictedSelf.reconcile(player);
+        if (sessionId === this.mySessionId) this.predictedSelf.reconcile(player, this._pendingInputs);
       });
 
       if (sessionId === this.mySessionId) {
@@ -1127,7 +1133,9 @@ export default class NetArenaScene extends Phaser.Scene {
       const touchW = this.touch.consumeWTap();
       const touchE = this.touch.consumeETap();
 
+      this._inputSeq += 1;
       const localInput = {
+        seq: this._inputSeq,
         wantsMove,
         aimAngle,
         qHeld: this.qKey.isDown || this.touch.qHeld,
@@ -1138,6 +1146,11 @@ export default class NetArenaScene extends Phaser.Scene {
       const canAct = this.room.state.matchPhase === "live";
       const hazards = { obstacles: this.room.state.obstacles, quicksand: this.room.state.quicksand };
       this.predictedSelf.step(delta, localInput, canAct, hazards);
+      // Kept until reconcile() sees a snapshot confirming the server has
+      // processed this seq — see PredictedSelf.reconcile()'s replay. Capped
+      // as a safety net against unbounded growth if the connection stalls.
+      this._pendingInputs.push({ seq: this._inputSeq, dtMs: delta, input: localInput, canAct, hazards });
+      if (this._pendingInputs.length > 600) this._pendingInputs.shift();
 
       this.room.send("input", localInput);
       this.wPressedFlag = false;

@@ -16,33 +16,24 @@ import {
 // NetFighter from this instead of the last authoritative snapshot, so your
 // own actions show up immediately instead of after a network round trip.
 //
-// What this predicts: movement, wall/quicksand interaction, and the four
-// states you can only ever enter through your OWN input (CHARGING, DASH,
-// PARRYING, KICKING) plus their default (no-counter-hit) resolution.
-// What it never predicts, deliberately: anything caused by another player
-// (being kicked/stunned, a dash actually landing a kill, a parry actually
-// countering someone) — those states/outcomes only ever arrive from the
-// server and are adopted wholesale via reconcile(), same as a correction.
+// Reconciliation is sequence-number-based, not state-guessing: NetArenaScene
+// tags every input it sends with an incrementing seq and keeps a buffer of
+// them (see its `_pendingInputs`); the server echoes back the seq of the
+// last input it actually processed (PlayerState.lastInputSeq). reconcile()
+// always adopts the server snapshot as ground truth, drops every buffered
+// input the server has confirmed, and *replays* whatever's left (inputs the
+// server hasn't caught up to yet) on top of that truth via the same step()
+// used for live simulation. This replaced three successive heuristic
+// attempts at guessing "is this snapshot stale" from state/category/time
+// alone — under real internet latency (where a skill's own duration can be
+// shorter than the round trip), none of those heuristics could reliably
+// tell a late-arriving stale packet apart from a fresh one, causing
+// rubber-banding and dropped-looking W/E presses. Replay sidesteps the
+// guessing entirely: it's always correct by construction.
 const MOVE_STEP_LIMIT = 4; // px per obstacle-collision substep, mirrors the server's dash substepping
 
-// Our own duration-based transitions (charge release, parry/kick timeout,
-// dash end) run off an independently-accumulated local dt clock, so they
-// land a handful of ms off the server's own clock for the same transition
-// — not a real desync, just two clocks measuring the same fixed duration.
-// Without this grace window, reconcile() would see e.g. predicted already
-// in GCD while a snapshot still mid-flight (taken just before the server's
-// own timer fired) says KICKING, "correct" back into KICKING, and then the
-// very next frame's re-entry into GCD would re-fire KICKING's start SFX —
-// an audible double-trigger for something that only ever happened once.
-const SELF_TRANSITION_GRACE_MS = 250;
-
-// Temporary diagnostic logging for the W-spam rubber-banding report — open
-// net.html?debugpredict to enable, remove once that's tracked down.
+// Open net.html?debugpredict to log reconcile()'s replay decisions.
 const DEBUG = typeof window !== "undefined" && window.location.search.includes("debugpredict");
-
-function now() {
-  return typeof performance !== "undefined" ? performance.now() : Date.now();
-}
 
 export default class PredictedSelf {
   constructor() {
@@ -59,24 +50,12 @@ export default class PredictedSelf {
 
     this._dash = null; // { dx, dy, remaining }
     this._stateTimer = 0;
-    // Every state a self-transition has left behind, each with its own
-    // expiry — see _setState()/reconcile() for why this needs to be a
-    // per-transition chain rather than one blanket "trust everything for
-    // 250ms" window.
-    this._supersededStates = []; // [{ state, until }, ...]
-  }
-
-  _setState(next) {
-    this._supersededStates.push({ state: this.state, until: now() + SELF_TRANSITION_GRACE_MS });
-    if (this._supersededStates.length > 8) this._supersededStates.shift();
-    this.state = next;
   }
 
   // Seeds/replaces predicted state wholesale from an authoritative snapshot
-  // — first snapshot after join/respawn, and every "can't predict this"
-  // correction in reconcile(). Deliberately does NOT count as a self
-  // transition — it's server-driven, so it shouldn't buy the next
-  // reconcile() call any extra trust in what's about to be predicted.
+  // — first snapshot after join/respawn only. Regular corrections go
+  // through reconcile() instead, which replays unconfirmed inputs back on
+  // top instead of freezing here.
   adopt(snap) {
     this.x = snap.x;
     this.y = snap.y;
@@ -88,7 +67,6 @@ export default class PredictedSelf {
     this.isAlive = snap.isAlive;
     this.score = snap.score;
     this._dash = null;
-    this._supersededStates = [];
     this.ready = true;
   }
 
@@ -101,10 +79,6 @@ export default class PredictedSelf {
     // comment) — hold still and wait for the server's next word on it.
     if (this.state === STATES.STUNNED || this.state === STATES.DEAD) return;
 
-    if (DEBUG && input.wPressed && this.state !== STATES.IDLE) {
-      console.log(`[predict] W dropped locally — state is ${this.state}, not IDLE`);
-    }
-
     switch (this.state) {
       case STATES.IDLE:
         this._moveLike(dtMs, input, PLAYER.BASE_SPEED, hazards);
@@ -113,7 +87,7 @@ export default class PredictedSelf {
       case STATES.GCD:
         this._moveLike(dtMs, input, PLAYER.BASE_SPEED, hazards);
         this.globalCooldown = Math.max(0, this.globalCooldown - dtMs);
-        if (this.globalCooldown <= 0) this._setState(STATES.IDLE);
+        if (this.globalCooldown <= 0) this.state = STATES.IDLE;
         break;
       case STATES.CHARGING:
         this._stepCharging(dtMs, input, hazards);
@@ -135,7 +109,7 @@ export default class PredictedSelf {
   }
 
   _enterGCD(multiplier) {
-    this._setState(STATES.GCD);
+    this.state = STATES.GCD;
     this.globalCooldown = GLOBAL_COOLDOWN_MS * multiplier;
   }
 
@@ -148,19 +122,18 @@ export default class PredictedSelf {
 
   _tryStartSkills(input) {
     if (input.qHeld) {
-      this._setState(STATES.CHARGING);
+      this.state = STATES.CHARGING;
       this.chargeTime = 0;
       this._dash = null;
       return;
     }
     if (input.wPressed) {
-      if (DEBUG) console.log(`[predict] W accepted, entering PARRYING (was ${this.state})`);
-      this._setState(STATES.PARRYING);
+      this.state = STATES.PARRYING;
       this._stateTimer = W_PARRY.DURATION_MS;
       return;
     }
     if (input.ePressed) {
-      this._setState(STATES.KICKING);
+      this.state = STATES.KICKING;
       this._stateTimer = E_KICK.TOTAL_MS;
     }
   }
@@ -176,7 +149,7 @@ export default class PredictedSelf {
       const ratio = this.chargeTime / Q_DASH.MAX_CHARGE_MS;
       const distance = Q_DASH.MIN_DISTANCE + (Q_DASH.MAX_DISTANCE - Q_DASH.MIN_DISTANCE) * ratio;
       this._dash = { dx: Math.cos(this.angle), dy: Math.sin(this.angle), remaining: distance };
-      this._setState(STATES.DASH);
+      this.state = STATES.DASH;
     }
   }
 
@@ -199,7 +172,7 @@ export default class PredictedSelf {
       const ny = this.y + this._dash.dy * perStep;
       if (this._hitsObstacle(nx, ny, hazards)) {
         this._dash = null;
-        this._setState(STATES.STUNNED);
+        this.state = STATES.STUNNED;
         return;
       }
       this.x = nx;
@@ -245,94 +218,47 @@ export default class PredictedSelf {
   }
 
   // Called whenever a fresh server snapshot for this player arrives (see
-  // NetArenaScene's onChange wiring) — corrects drift without necessarily
-  // discarding everything predicted since the last one.
-  reconcile(snap) {
+  // NetArenaScene's onChange wiring). `pendingInputs` is NetArenaScene's
+  // buffer of { seq, dtMs, input, canAct, hazards } entries sent but not
+  // yet confirmed by the server — mutated in place here to drop whatever
+  // this snapshot confirms.
+  reconcile(snap, pendingInputs) {
     if (!this.ready) {
       this.adopt(snap);
       return;
     }
 
-    const diedOrRespawned = Boolean(snap.isAlive) !== Boolean(this.isAlive);
-    // STUNNED/DEAD are only ever caused by another player's action (see the
-    // file comment) — always trust the server outright, self-prediction
-    // never claims these states on its own initiative.
-    const externallyCaused = snap.state === STATES.STUNNED || snap.state === STATES.DEAD;
-    const farAway = Math.hypot(snap.x - this.x, snap.y - this.y) > PLAYER.RADIUS * 4;
-    const categoryMismatch = this._category(snap.state) !== this._category(this.state);
+    const confirmedSeq = snap.lastInputSeq || 0;
+    while (pendingInputs.length && pendingInputs[0].seq <= confirmedSeq) pendingInputs.shift();
 
-    // Trust our own prediction only when the snapshot is still showing a
-    // state we ourselves have since moved past (a stale, still-in-flight
-    // packet from before one of our own transitions) — checked against the
-    // whole chain of recently-superseded states, each with its own expiry,
-    // not just the single most recent one. That's what makes chained
-    // transitions inside one burst of stale packets (e.g. spamming W while
-    // moving: IDLE->PARRYING then PARRYING->GCD) work: a packet still
-    // showing IDLE *or* PARRYING is recognized as stale either way.
-    //
-    // Two earlier, broader versions of this both failed in practice: (a)
-    // matching only the single immediately-prior state missed the second
-    // stale packet in a burst, snapping back to it and then forward again
-    // (rubber-banding); (b) trusting *any* snapshot for a flat time window
-    // after any transition also swallowed a genuinely fresh confirmation
-    // that happened to match an old category (e.g. our own next W press
-    // already confirmed PARRYING by the server, arriving just after we'd
-    // locally moved on from GCD back to IDLE) — the fresh confirmation got
-    // silently dropped instead of adopted. Matching against the exact
-    // superseded-state chain avoids both: it only ever suppresses a
-    // snapshot value we know for a fact predates our own prediction.
-    const trustPrediction =
-      !externallyCaused &&
-      !diedOrRespawned &&
-      this._supersededStates.some((s) => s.state === snap.state && now() < s.until);
-
-    if (diedOrRespawned || externallyCaused || (farAway && !trustPrediction) || (categoryMismatch && !trustPrediction)) {
-      if (DEBUG) {
-        const reason = diedOrRespawned
-          ? "diedOrRespawned"
-          : externallyCaused
-            ? "externallyCaused"
-            : farAway
-              ? `farAway(${Math.round(Math.hypot(snap.x - this.x, snap.y - this.y))}px)`
-              : "categoryMismatch";
-        console.log(
-          `[predict] HARD ADOPT (${reason}) predicted=${this.state} snap=${snap.state} trustPrediction=${trustPrediction} ` +
-            `predXY=(${Math.round(this.x)},${Math.round(this.y)}) snapXY=(${Math.round(snap.x)},${Math.round(snap.y)})`
-        );
-      }
-      this.adopt(snap);
-      return;
-    }
-    if (DEBUG && (categoryMismatch || snap.state !== this.state)) {
-      console.log(
-        `[predict] soft reconcile: predicted=${this.state} snap=${snap.state} trustPrediction=${trustPrediction} ` +
-          `categoryMismatch=${categoryMismatch}`
-      );
-    }
-
-    // Minor drift: ease position toward the authoritative value instead of
-    // popping.
-    this.x = Phaser.Math.Linear(this.x, snap.x, 0.5);
-    this.y = Phaser.Math.Linear(this.y, snap.y, 0.5);
-    if (!trustPrediction) {
-      // State/timers aren't rendered as motion, so there's no harm in just
-      // taking the server's numbers directly — except while trusting our
-      // own more-recent prediction above, where taking a stale timer back
-      // would just re-desync it from the state we're keeping.
-      this.state = snap.state;
-      this.chargeTime = snap.chargeTime;
-      this.stunTimer = snap.stunTimer;
-      this.globalCooldown = snap.globalCooldown || 0;
-    }
+    // Always start from the server's authoritative truth...
+    this.x = snap.x;
+    this.y = snap.y;
+    this.angle = snap.angle;
+    this.state = snap.state;
+    this.chargeTime = snap.chargeTime;
+    this.stunTimer = snap.stunTimer;
+    this.globalCooldown = snap.globalCooldown || 0;
     this.isAlive = snap.isAlive;
     this.score = snap.score;
-  }
+    this._dash = null;
 
-  _category(state) {
-    if (state === STATES.DASH) return "dash";
-    if (state === STATES.CHARGING) return "charging";
-    if (state === STATES.PARRYING) return "parrying";
-    if (state === STATES.KICKING) return "kicking";
-    return "free"; // IDLE/GCD — interchangeable for reconciliation purposes
+    // ...then fast-forward through whatever we've sent that the server
+    // hasn't processed yet, so our own more-recent input still shows up
+    // immediately instead of getting wiped by this snapshot. Skipped for
+    // STUNNED/DEAD (only ever externally caused, see file comment) and on
+    // death/respawn — nothing of ours belongs layered on top of those.
+    const externallyForced = this.state === STATES.STUNNED || this.state === STATES.DEAD || !this.isAlive;
+    if (DEBUG) {
+      console.log(
+        `[predict] reconcile: snap.state=${snap.state} confirmedSeq=${confirmedSeq} ` +
+          `replaying=${externallyForced ? 0 : pendingInputs.length} externallyForced=${externallyForced}`
+      );
+    }
+    if (externallyForced) return;
+
+    for (const entry of pendingInputs) {
+      this.step(entry.dtMs, entry.input, entry.canAct, entry.hazards);
+    }
   }
 }
