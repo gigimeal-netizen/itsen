@@ -47,6 +47,7 @@ export default class PredictedSelf {
     this.globalCooldown = 0;
     this.isAlive = true;
     this.score = 0;
+    this._lastLoggedState = null; // DEBUG-only, see reconcile()
 
     this._dash = null; // { dx, dy, remaining }
     this._stateTimer = 0;
@@ -241,7 +242,26 @@ export default class PredictedSelf {
     this.globalCooldown = snap.globalCooldown || 0;
     this.isAlive = snap.isAlive;
     this.score = snap.score;
-    this._dash = null;
+    // PARRYING/KICKING/DASH's remaining duration (_stateTimer) and DASH's
+    // direction/distance (_dash) are local-only bookkeeping the synced
+    // schema doesn't carry — they're normally set by _tryStartSkills()/
+    // _stepCharging() when we predict entering these states ourselves.
+    // Landing in one of them straight from a snapshot (the input that
+    // triggered it already got confirmed and trimmed out of the replay
+    // queue, so that entry code never reran) left them stale — often
+    // already <= 0 — so the very first replay step saw "time's up" and
+    // collapsed straight back to GCD, which read as Q/W/E never firing.
+    // Re-seed a fresh full duration/guessed dash here; precision doesn't
+    // matter since the server's own state flip is what actually ends the
+    // pose (see reconcile()'s next call), this only needs to survive the
+    // handful of replayed frames until then.
+    if (snap.state === STATES.PARRYING) this._stateTimer = W_PARRY.DURATION_MS;
+    else if (snap.state === STATES.KICKING) this._stateTimer = E_KICK.TOTAL_MS;
+    if (snap.state === STATES.DASH) {
+      this._dash = this._dash || { dx: Math.cos(snap.angle), dy: Math.sin(snap.angle), remaining: Q_DASH.MAX_DISTANCE };
+    } else {
+      this._dash = null;
+    }
 
     // ...then fast-forward through whatever we've sent that the server
     // hasn't processed yet, so our own more-recent input still shows up
@@ -249,16 +269,27 @@ export default class PredictedSelf {
     // STUNNED/DEAD (only ever externally caused, see file comment) and on
     // death/respawn — nothing of ours belongs layered on top of those.
     const externallyForced = this.state === STATES.STUNNED || this.state === STATES.DEAD || !this.isAlive;
-    if (DEBUG) {
-      console.log(
-        `[predict] reconcile: snap.state=${snap.state} confirmedSeq=${confirmedSeq} ` +
-          `replaying=${externallyForced ? 0 : pendingInputs.length} externallyForced=${externallyForced}`
-      );
+    if (externallyForced) {
+      if (DEBUG && snap.state !== this._lastLoggedState) {
+        console.log(`[predict] reconcile: externally forced into ${snap.state}`);
+        this._lastLoggedState = snap.state;
+      }
+      return;
     }
-    if (externallyForced) return;
 
     for (const entry of pendingInputs) {
       this.step(entry.dtMs, entry.input, entry.canAct, entry.hazards);
+    }
+
+    // Only log when something actually changed — snap.state=IDLE, nothing
+    // replayed, nothing to see is the common case while just moving, and
+    // logging every reconcile call (30/s) drowns out the interesting ones.
+    if (DEBUG && (snap.state !== this._lastLoggedState || this.state !== snap.state)) {
+      console.log(
+        `[predict] reconcile: snap.state=${snap.state} confirmedSeq=${confirmedSeq} ` +
+          `replayed=${pendingInputs.length} -> predicted.state=${this.state}`
+      );
+      this._lastLoggedState = snap.state;
     }
   }
 }
