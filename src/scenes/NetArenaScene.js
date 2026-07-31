@@ -49,6 +49,11 @@ const PLAYER_COLORS = [0x4fd1ff, 0xff8a5c, 0x8aff6b, 0xd88aff, 0xff5c5c, 0xffe06
 // real samples to interpolate between even when a patch is a bit late.
 const RENDER_DELAY_MS = 100;
 
+// Same flag as PredictedSelf.js's — open net.html?debugpredict to log every
+// real (frame-to-frame) local state transition _detectFighterEvents fires
+// SFX from, for tracking down the "skill triggers multiple times" report.
+const DEBUG = typeof window !== "undefined" && window.location.search.includes("debugpredict");
+
 export default class NetArenaScene extends Phaser.Scene {
   constructor() {
     super("NetArenaScene");
@@ -652,12 +657,21 @@ export default class NetArenaScene extends Phaser.Scene {
     }
 
     if (prev.state !== STATES.DASH && snap.state === STATES.DASH) {
+      if (DEBUG && sessionId === this.mySessionId) {
+        console.log(`[sfx] dashRelease() fired — prev.state=${prev.state} -> snap.state=${snap.state} t=${Math.round(performance.now())}`);
+      }
       Sfx.dashRelease();
     }
     if (prev.state !== STATES.PARRYING && snap.state === STATES.PARRYING) {
+      if (DEBUG && sessionId === this.mySessionId) {
+        console.log(`[sfx] parryStance() fired — prev.state=${prev.state} -> snap.state=${snap.state} t=${Math.round(performance.now())}`);
+      }
       Sfx.parryStance();
     }
     if (prev.state !== STATES.KICKING && snap.state === STATES.KICKING) {
+      if (DEBUG && sessionId === this.mySessionId) {
+        console.log(`[sfx] kickSwing() fired — prev.state=${prev.state} -> snap.state=${snap.state} t=${Math.round(performance.now())}`);
+      }
       Sfx.kickSwing();
       this._kickHitFlags.set(sessionId, false);
     }
