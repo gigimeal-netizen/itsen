@@ -55,13 +55,11 @@ export default class PredictedSelf {
 
     this._dash = null; // { dx, dy, remaining }
     this._stateTimer = 0;
-    this._prevState = STATES.IDLE;
     this._selfTransitionAt = -Infinity;
     this._selfTransitionConsumed = true;
   }
 
   _setState(next) {
-    this._prevState = this.state;
     this.state = next;
     this._selfTransitionAt = now();
     this._selfTransitionConsumed = false;
@@ -83,7 +81,6 @@ export default class PredictedSelf {
     this.isAlive = snap.isAlive;
     this.score = snap.score;
     this._dash = null;
-    this._prevState = snap.state;
     this._selfTransitionAt = -Infinity;
     this._selfTransitionConsumed = true;
     this.ready = true;
@@ -253,17 +250,23 @@ export default class PredictedSelf {
     const farAway = Math.hypot(snap.x - this.x, snap.y - this.y) > PLAYER.RADIUS * 4;
     const categoryMismatch = this._category(snap.state) !== this._category(this.state);
 
-    // Only the ONE patch that was already in flight when we transitioned
-    // (still showing exactly the state we were in right before) gets this
-    // pass — bounds it to the single stale packet this is meant to cover
-    // instead of a whole time window, which would also swallow a genuine
-    // fast event (e.g. an opponent's dash landing on us within the first
-    // moment of our own PARRYING) that happens to resolve to that same
-    // state value.
+    // Trust our own prediction for any snapshot that lands within the grace
+    // window right after a self-transition, regardless of which specific
+    // pre-transition state it's still showing. We used to require the
+    // snapshot match this._prevState exactly (only the ONE packet already
+    // in flight when we transitioned), but chaining two self-transitions
+    // inside one grace window (e.g. spamming W while moving: IDLE->PARRYING
+    // then PARRYING->GCD on timeout) advances _prevState each time, so a
+    // packet that was in flight before EITHER transition no longer matches
+    // and got treated as a real correction — snapping state back to a stale
+    // IDLE and yanking position toward its stale x/y every other packet
+    // (visible as rubber-banding, and the parry pose never got to show
+    // before being reverted). Every *actually* external event this window
+    // was meant to protect against (being stunned/killed by someone else)
+    // already forces adopt() via externallyCaused/diedOrRespawned below
+    // regardless of trustPrediction, so this doesn't need its own check.
     const recentSelfTransition = !this._selfTransitionConsumed && now() - this._selfTransitionAt < SELF_TRANSITION_GRACE_MS;
-    const serverStillOnPreviousStage = snap.state === this._prevState;
-    const trustPrediction =
-      recentSelfTransition && serverStillOnPreviousStage && !externallyCaused && !diedOrRespawned;
+    const trustPrediction = recentSelfTransition && !externallyCaused && !diedOrRespawned;
     if (trustPrediction) this._selfTransitionConsumed = true;
 
     if (diedOrRespawned || externallyCaused || farAway || (categoryMismatch && !trustPrediction)) {
