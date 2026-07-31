@@ -168,10 +168,19 @@ export default class NetArenaScene extends Phaser.Scene {
       if (!p.leftButtonDown()) this.pointerDown = false;
     });
     this.qKey = this.input.keyboard.addKey("Q");
-    this.input.keyboard.on("keydown-W", () => {
+    // event.repeat guards against OS keyboard auto-repeat — holding W/E
+    // even slightly past a quick tap fires native keydown repeatedly
+    // (every ~30-50ms after an initial ~500ms delay), and without this
+    // check each repeat re-armed the flag. Since PARRYING's own duration
+    // plus its GCD happens to land in a similar few-hundred-ms range, a
+    // held key kept re-triggering the whole skill 2-3 times per press —
+    // read as the sound/animation firing multiple times per single press.
+    this.input.keyboard.on("keydown-W", (event) => {
+      if (event.repeat) return;
       this.wPressedFlag = true;
     });
-    this.input.keyboard.on("keydown-E", () => {
+    this.input.keyboard.on("keydown-E", (event) => {
+      if (event.repeat) return;
       this.ePressedFlag = true;
     });
 
