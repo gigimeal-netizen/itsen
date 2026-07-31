@@ -233,10 +233,10 @@ export default class PredictedSelf {
     while (pendingInputs.length && pendingInputs[0].seq <= confirmedSeq) pendingInputs.shift();
 
     // Always start from the server's authoritative truth...
+    const wasAlreadyInState = this.state === snap.state;
     this.x = snap.x;
     this.y = snap.y;
     this.angle = snap.angle;
-    this.state = snap.state;
     this.chargeTime = snap.chargeTime;
     this.stunTimer = snap.stunTimer;
     this.globalCooldown = snap.globalCooldown || 0;
@@ -251,17 +251,20 @@ export default class PredictedSelf {
     // queue, so that entry code never reran) left them stale — often
     // already <= 0 — so the very first replay step saw "time's up" and
     // collapsed straight back to GCD, which read as Q/W/E never firing.
-    // Re-seed a fresh full duration/guessed dash here; precision doesn't
-    // matter since the server's own state flip is what actually ends the
-    // pose (see reconcile()'s next call), this only needs to survive the
-    // handful of replayed frames until then.
-    if (snap.state === STATES.PARRYING) this._stateTimer = W_PARRY.DURATION_MS;
-    else if (snap.state === STATES.KICKING) this._stateTimer = E_KICK.TOTAL_MS;
+    // Only re-seed on a fresh entry into the state (it wasn't what we were
+    // already predicting) — resetting on every single reconcile call (this
+    // fires up to ~30/s) would keep stomping the natural countdown that
+    // ordinary per-frame step() calls are making between reconciles.
+    if (snap.state === STATES.PARRYING && !wasAlreadyInState) this._stateTimer = W_PARRY.DURATION_MS;
+    else if (snap.state === STATES.KICKING && !wasAlreadyInState) this._stateTimer = E_KICK.TOTAL_MS;
     if (snap.state === STATES.DASH) {
-      this._dash = this._dash || { dx: Math.cos(snap.angle), dy: Math.sin(snap.angle), remaining: Q_DASH.MAX_DISTANCE };
+      if (!wasAlreadyInState || !this._dash) {
+        this._dash = { dx: Math.cos(snap.angle), dy: Math.sin(snap.angle), remaining: Q_DASH.MAX_DISTANCE };
+      }
     } else {
       this._dash = null;
     }
+    this.state = snap.state;
 
     // ...then fast-forward through whatever we've sent that the server
     // hasn't processed yet, so our own more-recent input still shows up

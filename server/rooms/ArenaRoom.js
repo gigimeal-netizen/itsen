@@ -159,10 +159,20 @@ class ArenaRoom extends Room {
       // prediction mismatch, not just the surprise fire.
       if (msg.wPressed && player && player.state === C.STATES.IDLE) s.wPressed = true;
       if (msg.ePressed && player && player.state === C.STATES.IDLE) s.ePressed = true;
-      // Echoed back to the client so PredictedSelf.reconcile() knows which
-      // of its own buffered inputs this state already reflects and can
-      // replay only what's left instead of guessing from state/timing.
-      if (player && typeof msg.seq === "number" && msg.seq > player.lastInputSeq) player.lastInputSeq = msg.seq;
+      // Staged here, NOT written to player.lastInputSeq yet — this message
+      // is received mid-frame, before tick()/stepPlayer() next runs and
+      // actually applies its effects (wantsMove/qHeld/wPressed/ePressed
+      // above) to `player`. Publishing the seq to the synced field
+      // immediately would tell the client "this input's effects are
+      // already reflected in the state you're about to receive" while
+      // they're really still one tick away — a race PredictedSelf.reconcile()
+      // hit constantly, trimming its replay queue's triggering input just
+      // before the snapshot actually showed the resulting state, making a
+      // just-started PARRYING/KICKING vanish and then immediately
+      // re-enter once the server caught up (read as "ends too fast" plus
+      // a doubled entry SFX). tick() copies this into player.lastInputSeq
+      // right after stepPlayer() applies it, so the two always move together.
+      if (typeof msg.seq === "number" && msg.seq > s.pendingInputSeq) s.pendingInputSeq = msg.seq;
     });
 
     this.setSimulationInterval((dtMs) => this.tick(dtMs), C.SIMULATION_INTERVAL_MS);
@@ -234,6 +244,7 @@ class ArenaRoom extends Room {
       qHeld: false,
       wPressed: false,
       ePressed: false,
+      pendingInputSeq: 0, // see onMessage("input")/tick() — published to player.lastInputSeq only after stepPlayer() applies it
       dash: null,
       dashKilled: false,
       kickHitApplied: false,
@@ -419,6 +430,9 @@ class ArenaRoom extends Room {
         continue;
       }
       this.stepPlayer(player, s, dtMs);
+      // Now safe to publish — this tick just applied everything staged up
+      // to this seq (see onMessage("input")'s comment).
+      player.lastInputSeq = s.pendingInputSeq;
     }
     this.checkDashHits();
     this.checkKicks();
