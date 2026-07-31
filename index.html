@@ -95,6 +95,15 @@
     border-color: currentColor;
     box-shadow: 0 0 16px 2px currentColor;
   }
+  .skill-slot.empowered {
+    border-color: #ffe066;
+    box-shadow: 0 0 14px 3px rgba(255, 224, 102, 0.75);
+    animation: empoweredPulse 0.9s ease-in-out infinite;
+  }
+  @keyframes empoweredPulse {
+    0%, 100% { box-shadow: 0 0 10px 2px rgba(255, 224, 102, 0.55); }
+    50% { box-shadow: 0 0 18px 4px rgba(255, 224, 102, 0.9); }
+  }
   .skill-fill {
     position: absolute; left: 0; right: 0; bottom: 0; height: 0%;
     background: #3ddc84;
@@ -289,6 +298,10 @@
     <b>W</b> 반격자세(0.5초 무적)&nbsp;&nbsp;
     <b>E</b> 발차기(기절+넉백)<br/>
     Q는 W에게 막히고, W는 E에게 뚫리고, E는 Q에게 진다
+  </div>
+  <div id="classSwitch" style="display:flex; gap:6px;">
+    <button class="mode-btn" id="classSwordsmanBtn">검사</button>
+    <button class="mode-btn" id="classKnightBtn">기사</button>
   </div>
   <button id="startBtn">시작하기</button>
 </div>

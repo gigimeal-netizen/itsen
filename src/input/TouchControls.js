@@ -8,6 +8,8 @@ export default class TouchControls {
   constructor() {
     this.joystick = { active: false, angle: 0, magnitude: 0 };
     this.qHeld = false;
+    this.wHeld = false;
+    this._qTap = false;
     this._wTap = false;
     this._eTap = false;
 
@@ -15,13 +17,28 @@ export default class TouchControls {
     this._setupButton("btnQ", {
       onDown: () => {
         this.qHeld = true;
+        this._qTap = true;
       },
       onUp: () => {
         this.qHeld = false;
       },
     });
-    this._setupButton("btnW", { onDown: () => (this._wTap = true) });
+    this._setupButton("btnW", {
+      onDown: () => {
+        this._wTap = true;
+        this.wHeld = true;
+      },
+      onUp: () => {
+        this.wHeld = false;
+      },
+    });
     this._setupButton("btnE", { onDown: () => (this._eTap = true) });
+  }
+
+  consumeQTap() {
+    const v = this._qTap;
+    this._qTap = false;
+    return v;
   }
 
   consumeWTap() {

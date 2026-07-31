@@ -263,6 +263,81 @@ class Sfx {
     this._noise({ duration: 0.3, peak: 0.4, filterFreq: 500, filterType: "lowpass", delay: 0.02 });
   }
 
+  // 12. Knight W held-guard raising — knightW clip, distinct from the
+  // swordsman's shieldOn/parryStance (a held guard vs. a tap parry).
+  shieldRaise() {
+    if (this._playClip("knightW", { volume: 0.55 })) return;
+    this._noise({ duration: 0.16, peak: 0.25, filterFreq: 2600, filterType: "bandpass" });
+    this._tone({ freqStart: 700, freqEnd: 1500, duration: 0.16, type: "sine", peak: 0.18 });
+  }
+
+  // 12b. Knight W held-guard lowering (voluntary release or hold-ceiling
+  // timeout) — the powering-down counterpart to shieldRaise(). No dedicated
+  // clip supplied; stays synthesized.
+  shieldLower() {
+    this._noise({ duration: 0.14, peak: 0.2, filterFreq: 1800, filterType: "bandpass" });
+    this._tone({ freqStart: 1200, freqEnd: 500, duration: 0.14, type: "sine", peak: 0.14 });
+  }
+
+  // 13. Knight empowered-Q buff granted (successful shield block) — a bright
+  // rising sparkle layered on top of parrySuccess(). No dedicated clip
+  // supplied (distinct from the powerdQ release clip below); stays synthesized.
+  empoweredQCharge() {
+    this._tone({ freqStart: 900, freqEnd: 2200, duration: 0.25, type: "triangle", peak: 0.22, delay: 0.05 });
+    this._tone({ freqStart: 1800, freqEnd: 3200, duration: 0.2, type: "sine", peak: 0.14, delay: 0.09 });
+  }
+
+  // 13b. Knight base Q release (comboDash, non-empowered): knightQ1 clip.
+  comboDashRelease() {
+    if (this._playClip("knightQ1", { volume: 0.6 })) return;
+    this._noise({ duration: 0.2, peak: 0.5, filterFreq: 2000, filterType: "highpass" });
+    this._metalSlice({ freqStart: 2200, freqEnd: 900, duration: 0.14, peak: 0.35, delay: 0.02 });
+  }
+
+  // 14. Knight empowered-Q release — knightPowerdQ clip, for the instakill
+  // wide-sweep variant.
+  empoweredQRelease() {
+    // knightPowerdQ.mp3 has some lead-in silence/windup baked into the file
+    // before the actual hit lands, so `seek` skips ahead into it. (A seek of
+    // 1s landed past the clip's actual length and produced no sound at all.)
+    // An instant synthesized transient also fires at t=0 on top, so the hit
+    // reads as immediate the moment the strike activates either way.
+    this._metalSlice({ freqStart: 3200, freqEnd: 1000, duration: 0.1, peak: 0.5 });
+    this._thump({ freq: 75, duration: 0.14, peak: 0.45 });
+    this._playClip("knightPowerdQ", { volume: 0.5, seek: 0.5 });
+  }
+
+  // 15. Knight combo follow-up (Q>Q) swing: knightQSwoosh clip.
+  comboSwing() {
+    if (this._playClip("knightQSwoosh", { volume: 0.55 })) return;
+    this._noise({ duration: 0.18, peak: 0.36, filterFreq: 900, filterType: "bandpass" });
+  }
+
+  // 16. Knight combo follow-up (Q>Q) hit: knightQ2 clip.
+  comboHit() {
+    if (this._playClip("knightQ2", { volume: 0.6 })) return;
+    this._thump({ freq: 65, duration: 0.2, peak: 0.55 });
+    this._noise({ duration: 0.14, peak: 0.38, filterFreq: 500, filterType: "lowpass" });
+  }
+
+  // 17. Knight shield-charge (E) release: knightE clip.
+  shieldChargeRelease() {
+    if (this._playClip("knightE", { volume: 0.6 })) return;
+    this._noise({ duration: 0.2, peak: 0.4, filterFreq: 700, filterType: "lowpass" });
+    this._thump({ freq: 60, duration: 0.16, peak: 0.3, delay: 0.02 });
+  }
+
+  // 18. Knight shield-charge hit: metal-vs-body clang, used for both the
+  // plain and vs-guard cases (the vs-guard case is differentiated visually
+  // via impact-burst size/color, not a second sound). No separate impact
+  // clip supplied — the E release clip already covers the action, so this
+  // stays synthesized to keep whiff vs. hit distinguishable (same reasoning
+  // as kickHit()).
+  shieldBash() {
+    this._metalSlice({ freqStart: 1600, freqEnd: 500, duration: 0.14, peak: 0.35 });
+    this._thump({ freq: 85, duration: 0.16, peak: 0.45, delay: 0.01 });
+  }
+
   // 10. Quicksand appearing: a wet shifting-ground rumble as the patch forms.
   terrainAppear() {
     if (this._playClip("terrainAppear", { volume: 0.6 })) return;

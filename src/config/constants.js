@@ -107,6 +107,15 @@ export const FAILED_PARRY_GCD_MULTIPLIER = 1.6; // W timing out with no counter
 export const CLASSES = {
   swordsman: {
     id: "swordsman",
+    // skillTypes tells shared FSM code (Combatant.js) which *shape* of
+    // skill logic to run for Q/W/E, so it can branch on skill shape instead
+    // of classId strings — see the "knight" entry below for the first class
+    // with different shapes.
+    skillTypes: { q: "chargeDash", w: "tapParry", e: "kickCone" },
+    // Per-class look, independent of skillTypes — headShape lets each class
+    // read as visually distinct at a glance (see Combatant._drawFigure).
+    // "circle" is the default/original look.
+    visual: { headShape: "circle" },
     qDash: {
       MAX_CHARGE_MS: 1200, // charge cap
       MIN_DISTANCE: 140,
@@ -124,6 +133,68 @@ export const CLASSES = {
       KNOCKBACK_SPEED: 900,
       ACTIVE_MS: 120, // how long the kick hitbox is active (startup->active window)
       TOTAL_MS: 260, // total animation lock before returning to IDLE/GCD
+    },
+  },
+  // Stage 2a (single-player only so far — see src/CLAUDE.md's note on
+  // mirroring server-side once this is ported to multiplayer): 기사/Knight.
+  // Q is a short combo dash (knockback, not instakill) with a follow-up
+  // swing window; W is a HELD guard (not a tap) that empowers the next Q
+  // into an instakill on a successful block; E is a shield charge that
+  // stuns instead of just knocking back if it lands on a W-active target.
+  knight: {
+    id: "knight",
+    skillTypes: { q: "comboDash", w: "heldGuard", e: "shieldCharge" },
+    visual: { headShape: "square" }, // reads as a helmet, distinct from swordsman's bare head
+    qDash: {
+      // No hold-to-charge — a single tap fires a fixed-distance dash (see
+      // Combatant._startComboDash). Unlike the swordsman's Q, this one is
+      // never hold-and-release. A pending empowered-Q buff (see
+      // empoweredQBuff below) redirects this tap to empoweredStrike instead.
+      DISTANCE: 200,
+      SPEED: 1300,
+      LETHAL: false,
+      PIERCE: false,
+      KNOCKBACK_DISTANCE: 110,
+      KNOCKBACK_SPEED: 950,
+    },
+    // Empowered Q (consumed by a successful W block): a stationary wide
+    // straight-line AOE in front of the Knight — not a dash, doesn't move
+    // the character. See Combatant._startEmpoweredStrike/_checkEmpoweredStrike.
+    empoweredStrike: {
+      LENGTH: 340, // reach along the facing direction
+      WIDTH: 110, // full width of the line
+      ACTIVE_MS: 90, // hit window — brief, since it's a burst, not a sweep
+      TOTAL_MS: 300, // total animation lock before GCD
+    },
+    wParry: {
+      HOLD: true, // held-while-key-down, not a fixed-duration tap
+      MAX_HOLD_MS: 4000, // ceiling so a raised shield can't be held forever
+      MOVE_SPEED_MULTIPLIER: 0.35, // -65% move speed while the shield is up
+    },
+    eShieldCharge: {
+      DISTANCE: 220,
+      SPEED: 1100,
+      KNOCKBACK_DISTANCE: 130,
+      KNOCKBACK_SPEED: 1000,
+      // landing on a W-active (guarding) target: still beats it, same
+      // triangle edge as the swordsman's kick-beats-parry.
+      VS_GUARD_KNOCKBACK_DISTANCE: 220,
+      VS_GUARD_KNOCKBACK_SPEED: 1400,
+      VS_GUARD_STUN_MS: STUN_DURATION_MS,
+    },
+    comboWindow: {
+      WINDOW_MS: 550, // time after a landed Q hit to press Q/W/E for a follow-up
+    },
+    comboAttack: {
+      RANGE: 80,
+      HALF_ANGLE_DEG: 55,
+      ACTIVE_MS: 110,
+      TOTAL_MS: 240,
+      KNOCKBACK_DISTANCE: 130,
+      KNOCKBACK_SPEED: 1000,
+    },
+    empoweredQBuff: {
+      DURATION_MS: 6000, // expires silently if unused — no infinite banking
     },
   },
 };
@@ -145,4 +216,9 @@ export const STATES = {
   STUNNED: "STUNNED",
   GCD: "GCD", // global cooldown lockout, movement allowed, skills blocked
   DEAD: "DEAD",
+  // Stage 2a (Knight, single-player only) additions:
+  SHIELD_CHARGE: "SHIELD_CHARGE", // Knight's E
+  COMBO_WINDOW: "COMBO_WINDOW", // waiting for a Q/W/E follow-up after a landed Knight Q hit
+  COMBO_ATTACK: "COMBO_ATTACK", // the follow-up hammer swing itself
+  EMPOWERED_STRIKE: "EMPOWERED_STRIKE", // Knight's empowered Q — stationary wide line-AOE, not a dash
 };

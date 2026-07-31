@@ -17,7 +17,7 @@ import Sfx from "../audio/Sfx.js";
 // set wantsMove/aimAngle/qHeld/wPressed/ePressed each frame before
 // calling super.update(); this class only owns state transitions and physics.
 export default class Combatant extends Phaser.GameObjects.Container {
-  constructor(scene, x, y, color) {
+  constructor(scene, x, y, color, classId = DEFAULT_CLASS_ID) {
     super(scene, x, y);
     scene.add.existing(this);
     scene.physics.add.existing(this);
@@ -27,12 +27,11 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this.color = color;
     this.spawnX = x;
     this.spawnY = y;
-    // Fixed for this Combatant's lifetime — single-player has no
-    // class-select UI yet, so this always resolves to the one existing
-    // class, but every skill-tuning read below goes through this.skills
-    // instead of a bare constant so a future class only needs a new
-    // CLASSES entry, not new read sites.
-    this.classId = DEFAULT_CLASS_ID;
+    // Fixed for this Combatant's lifetime. Every skill-tuning read below
+    // goes through this.skills instead of a bare constant, and every
+    // skill-shape branch checks this.skills.skillTypes.{q,w,e} instead of
+    // this.classId directly, so a new class only needs a new CLASSES entry.
+    this.classId = classId;
     this.skills = classSkills(this.classId);
     this._respawnClock = 0; // ms remaining until respawn(), only ticks while dead
     // Shadow lives OUTSIDE the container (it must not inherit facing rotation —
@@ -67,6 +66,8 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this.wantsMove = false;
     this.aimAngle = 0;
     this.qHeld = false;
+    this.qPressed = false; // tap edge — read by non-charging Q skills (e.g. Knight's comboDash)
+    this.wHeld = false; // held-guard classes (e.g. Knight) read this instead of wPressed
     this.wPressed = false;
     this.ePressed = false;
 
@@ -74,12 +75,17 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this.inSlowZone = false;
 
     // per-state scratch data
-    this._dash = null; // { dx, dy, remaining }
+    this._dash = null; // { dx, dy, remaining, lethal, pierce, widthMultiplier, knockbackDistance, knockbackSpeed }
     this._dashKilled = false; // this dash landed a kill -> skip GCD on completion
     this._kickHitApplied = false;
     this._kickCounteredParry = false; // this kick hit a PARRYING target -> skip GCD
+    this._comboHitApplied = false; // Knight combo follow-up: one-shot per COMBO_ATTACK instance
+    this._empoweredStrikeHitApplied = false; // Knight empowered Q: one-shot per EMPOWERED_STRIKE instance
     this._parrySuccess = false;
     this._knockback = null; // { dx, dy, remainingMs, speed }
+    this._empoweredQMs = 0; // Knight: time left on the empowered-Q buff, granted by a successful block
+    this._shieldCharge = null; // Knight E: { dx, dy, remaining }
+    this._shieldChargeCounteredGuard = false; // this shield charge hit a PARRYING/guarding target -> skip GCD
   }
 
   destroyEntity() {
@@ -217,6 +223,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
       return;
     }
     this._clock += dtMs;
+    if (this._empoweredQMs > 0) this._empoweredQMs = Math.max(0, this._empoweredQMs - dtMs);
 
     if (this.state === STATES.DASH) {
       this._updateAfterimages(dtMs);
@@ -243,6 +250,18 @@ export default class Combatant extends Phaser.GameObjects.Container {
         break;
       case STATES.KICKING:
         this._updateKicking(dtMs);
+        break;
+      case STATES.SHIELD_CHARGE:
+        this._updateShieldCharge(dtMs);
+        break;
+      case STATES.COMBO_WINDOW:
+        this._updateComboWindow(dtMs);
+        break;
+      case STATES.COMBO_ATTACK:
+        this._updateComboAttack(dtMs);
+        break;
+      case STATES.EMPOWERED_STRIKE:
+        this._updateEmpoweredStrike(dtMs);
         break;
       case STATES.STUNNED:
         this.body.setVelocity(0, 0);
@@ -287,7 +306,14 @@ export default class Combatant extends Phaser.GameObjects.Container {
   }
 
   _tryStartSkills() {
-    if (this.qHeld) {
+    const skillTypes = this.skills.skillTypes;
+    if (skillTypes.q === "comboDash") {
+      // No hold-to-charge — a tap fires a fixed-distance dash immediately.
+      if (this.qPressed) {
+        this._startComboDash();
+        return;
+      }
+    } else if (this.qHeld) {
       this.chargeTime = 0;
       this._dash = null;
       this._chargeReadyPlayed = false;
@@ -295,7 +321,12 @@ export default class Combatant extends Phaser.GameObjects.Container {
       Sfx.chargeLoopStart();
       return;
     }
-    if (this.wPressed) {
+    if (skillTypes.w === "heldGuard") {
+      if (this.wHeld) {
+        this._startHeldGuard();
+        return;
+      }
+    } else if (this.wPressed) {
       this.setState(STATES.PARRYING);
       this.stateTimer = this.skills.wParry.DURATION_MS;
       this._parrySuccess = false;
@@ -304,6 +335,10 @@ export default class Combatant extends Phaser.GameObjects.Container {
       return;
     }
     if (this.ePressed) {
+      if (skillTypes.e === "shieldCharge") {
+        this._startShieldCharge();
+        return;
+      }
       this.setState(STATES.KICKING);
       this.stateTimer = this.skills.eKick.TOTAL_MS;
       this._kickHitApplied = false;
@@ -311,6 +346,16 @@ export default class Combatant extends Phaser.GameObjects.Container {
       this.body.setVelocity(0, 0);
       Sfx.kickSwing();
     }
+  }
+
+  // Knight W: held while the key/button is down, instead of a fixed-duration
+  // tap. See _updateParrying() for the hold-ceiling/early-release exit.
+  _startHeldGuard() {
+    this.setState(STATES.PARRYING);
+    this.stateTimer = this.skills.wParry.MAX_HOLD_MS;
+    this._parrySuccess = false;
+    this.body.setVelocity(0, 0);
+    Sfx.shieldRaise();
   }
 
   _updateCharging(dtMs) {
@@ -376,15 +421,70 @@ export default class Combatant extends Phaser.GameObjects.Container {
     const qDash = this.skills.qDash;
     const ratio = this.chargeTime / qDash.MAX_CHARGE_MS;
     const distance = qDash.MIN_DISTANCE + (qDash.MAX_DISTANCE - qDash.MIN_DISTANCE) * ratio;
+    this._beginDash(distance);
+  }
+
+  // Knight: no hold-to-charge — a tap fires a fixed-distance dash straight
+  // from IDLE (see _tryStartSkills), skipping CHARGING entirely. A pending
+  // empowered-Q buff redirects this to the stationary line-AOE instead.
+  _startComboDash() {
+    if (this._empoweredQMs > 0) {
+      this._startEmpoweredStrike();
+      return;
+    }
+    this._beginDash(this.skills.qDash.DISTANCE);
+  }
+
+  // Shared by both Q shapes: assembles the actual _dash object.
+  _beginDash(baseDistance) {
+    const qDash = this.skills.qDash;
     this._dash = {
       dx: Math.cos(this.facing),
       dy: Math.sin(this.facing),
-      remaining: distance,
+      remaining: baseDistance,
+      lethal: qDash.LETHAL !== false,
+      pierce: qDash.PIERCE !== false,
+      widthMultiplier: 1,
+      knockbackDistance: qDash.KNOCKBACK_DISTANCE,
+      knockbackSpeed: qDash.KNOCKBACK_SPEED,
     };
     this._dashKilled = false;
     this.setState(STATES.DASH);
-    Sfx.dashRelease();
+    if (this.skills.skillTypes.q === "comboDash") Sfx.comboDashRelease();
+    else Sfx.dashRelease();
     this._startDashScratch();
+  }
+
+  // Empowered Q (Knight, granted by a successful shield block): a stationary
+  // wide straight-line AOE in front of the character, not a dash — the
+  // character doesn't move. See ArenaScene._checkEmpoweredStrike for the
+  // actual rectangle hit-test.
+  _startEmpoweredStrike() {
+    this._empoweredQMs = 0;
+    this._empoweredStrikeHitApplied = false;
+    this.body.setVelocity(0, 0);
+    this.setState(STATES.EMPOWERED_STRIKE);
+    this.stateTimer = this.skills.empoweredStrike.TOTAL_MS;
+    Sfx.empoweredQRelease();
+  }
+
+  _updateEmpoweredStrike(dtMs) {
+    this.body.setVelocity(0, 0);
+    this._tickTimer(dtMs, () => this.enterGCD());
+  }
+
+  get isEmpoweredStrikeActive() {
+    const cfg = this.skills.empoweredStrike;
+    return (
+      this.state === STATES.EMPOWERED_STRIKE &&
+      !this._empoweredStrikeHitApplied &&
+      this.stateTimer <= cfg.TOTAL_MS &&
+      this.stateTimer > cfg.TOTAL_MS - cfg.ACTIVE_MS
+    );
+  }
+
+  markEmpoweredStrikeApplied() {
+    this._empoweredStrikeHitApplied = true;
   }
 
   // A scuffed groove in the ground tracing exactly how far the dash actually
@@ -466,13 +566,23 @@ export default class Combatant extends Phaser.GameObjects.Container {
   }
 
   // A dash that killed someone skips the global cooldown entirely, same
-  // exemption a successful parry gets.
+  // exemption a successful parry gets. A comboDash always opens a brief
+  // follow-up window on completion (whiff or hit alike) unless it killed.
   _finishDash() {
     this._endDashScratch();
     const killed = this._dashKilled;
     this._dashKilled = false;
-    if (killed) this.setState(STATES.IDLE);
-    else this.enterGCD();
+    if (killed) {
+      this.setState(STATES.IDLE);
+      return;
+    }
+    if (this.skills.skillTypes.q === "comboDash") {
+      this.setState(STATES.COMBO_WINDOW);
+      this.stateTimer = this.skills.comboWindow.WINDOW_MS;
+      this.body.setVelocity(0, 0);
+      return;
+    }
+    this.enterGCD();
   }
 
   // Called by the arena when Arcade physics reports this combatant hit a wall mid-dash.
@@ -493,6 +603,14 @@ export default class Combatant extends Phaser.GameObjects.Container {
     }
   }
 
+  // Dispatches a wall-collision stop to whichever movement skill is
+  // currently active — a future movement skill only needs a branch here,
+  // not a re-wire of the arena's wall collider callback.
+  handleWallStop() {
+    if (this.state === STATES.DASH) this.stopDashOnWall();
+    else if (this.state === STATES.SHIELD_CHARGE) this.stopShieldChargeOnWall();
+  }
+
   // Called by the arena when this dashing combatant rams a PARRYING opponent.
   selfStunFromParry() {
     if (this.state !== STATES.DASH) return;
@@ -503,6 +621,27 @@ export default class Combatant extends Phaser.GameObjects.Container {
   }
 
   _updateParrying(dtMs) {
+    if (this.skills.skillTypes.w === "heldGuard") {
+      // Held guard: still mobile, just slowed — the shield goes up but
+      // doesn't root the player in place like a tap-parry does.
+      this.facing = this.aimAngle;
+      if (this.wantsMove) {
+        let speed = PLAYER.BASE_SPEED * this.skills.wParry.MOVE_SPEED_MULTIPLIER;
+        if (this.inSlowZone) speed *= SLOW_ZONE_FACTOR;
+        this.body.setVelocity(Math.cos(this.facing) * speed, Math.sin(this.facing) * speed);
+      } else {
+        this.body.setVelocity(0, 0);
+      }
+      // Lowering the shield (voluntary release or hitting the hold-ceiling)
+      // pays the standard global cooldown, same as any other skill use — a
+      // successful block (parrySuccess()) is the one path that's exempt.
+      this.stateTimer -= dtMs;
+      if (this.stateTimer <= 0 || !this.wHeld) {
+        Sfx.shieldLower();
+        this.enterGCD();
+      }
+      return;
+    }
     this.body.setVelocity(0, 0);
     this._tickTimer(dtMs, () => {
       // Timed out without a counter: failure penalty is an extended cooldown
@@ -517,6 +656,10 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this._parrySuccess = true;
     this.setState(STATES.IDLE); // exempt from global cooldown
     Sfx.parrySuccess();
+    if (this.skills.skillTypes.w === "heldGuard") {
+      this._empoweredQMs = this.skills.empoweredQBuff.DURATION_MS;
+      Sfx.empoweredQCharge();
+    }
     return true;
   }
 
@@ -547,32 +690,192 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this.scene.cameras.main.shake(80, 0.0035);
   }
 
+  // Knight: brief window after a landed comboDash hit to press Q/W/E again
+  // for a follow-up swing. Times out into GCD with no extra penalty (the
+  // base hit already succeeded) if nothing is pressed in time.
+  // Which key is pressed during the window picks a different follow-up:
+  // Q -> another hammer swing (COMBO_ATTACK), E -> chain straight into the
+  // shield charge, W -> chain straight into raising the shield.
+  _updateComboWindow(dtMs) {
+    this.body.setVelocity(0, 0);
+    // Track the current mouse aim while waiting, so whichever follow-up
+    // fires uses where the player is aiming *now* — not the original dash's
+    // stale travel direction from before the window opened.
+    this.facing = this.aimAngle;
+    const skillTypes = this.skills.skillTypes;
+    if (this.qHeld) {
+      this.setState(STATES.COMBO_ATTACK);
+      this.stateTimer = this.skills.comboAttack.TOTAL_MS;
+      this._comboHitApplied = false;
+      Sfx.comboSwing();
+      return;
+    }
+    if (this.ePressed && skillTypes.e === "shieldCharge") {
+      this._startShieldCharge();
+      return;
+    }
+    const wantsW = skillTypes.w === "heldGuard" ? this.wHeld : this.wPressed;
+    if (wantsW) {
+      if (skillTypes.w === "heldGuard") this._startHeldGuard();
+      else {
+        this.setState(STATES.PARRYING);
+        this.stateTimer = this.skills.wParry.DURATION_MS;
+        this._parrySuccess = false;
+        Sfx.parryStance();
+      }
+      return;
+    }
+    this._tickTimer(dtMs, () => this.enterGCD());
+  }
+
+  _updateComboAttack(dtMs) {
+    this.body.setVelocity(0, 0);
+    this._tickTimer(dtMs, () => this.enterGCD());
+  }
+
+  get isComboAttackActive() {
+    const combo = this.skills.comboAttack;
+    return (
+      this.state === STATES.COMBO_ATTACK &&
+      !this._comboHitApplied &&
+      this.stateTimer <= combo.TOTAL_MS &&
+      this.stateTimer > combo.TOTAL_MS - combo.ACTIVE_MS
+    );
+  }
+
+  markComboHitApplied() {
+    this._comboHitApplied = true;
+    Sfx.comboHit();
+    this.scene.cameras.main.shake(80, 0.0035);
+  }
+
+  // Knight E: a short forward shield charge. Mirrors the Q-dash trio
+  // (_updateDash/markDashKill/_finishDash) but with its own distance/speed
+  // and a different counter-a-guard exemption instead of a counter-a-parry one.
+  _startShieldCharge() {
+    const eCharge = this.skills.eShieldCharge;
+    this._shieldCharge = {
+      dx: Math.cos(this.facing),
+      dy: Math.sin(this.facing),
+      remaining: eCharge.DISTANCE,
+    };
+    this._shieldChargeCounteredGuard = false;
+    this.setState(STATES.SHIELD_CHARGE);
+    Sfx.shieldChargeRelease();
+  }
+
+  _updateShieldCharge(dtMs) {
+    if (!this._shieldCharge) {
+      this.enterGCD();
+      return;
+    }
+    const eCharge = this.skills.eShieldCharge;
+    const step = (eCharge.SPEED * dtMs) / 1000;
+    const travel = Math.min(step, this._shieldCharge.remaining);
+    this.body.setVelocity(this._shieldCharge.dx * eCharge.SPEED, this._shieldCharge.dy * eCharge.SPEED);
+    this._shieldCharge.remaining -= travel;
+
+    if (this._shieldCharge.remaining <= 0) {
+      this._shieldCharge = null;
+      this.body.setVelocity(0, 0);
+      this._finishShieldCharge();
+    }
+  }
+
+  // Called by the arena when this shield charge lands a hit — vsGuard=true
+  // means it beat a raised (PARRYING) target, which skips the global cooldown
+  // same as E beating W does for the swordsman's kick.
+  markShieldChargeApplied(vsGuard = false) {
+    this._shieldChargeCounteredGuard = vsGuard;
+    Sfx.shieldBash();
+    this.scene.cameras.main.shake(vsGuard ? 90 : 70, vsGuard ? 0.005 : 0.0035);
+  }
+
+  _finishShieldCharge() {
+    const counteredGuard = this._shieldChargeCounteredGuard;
+    this._shieldChargeCounteredGuard = false;
+    if (counteredGuard) this.setState(STATES.IDLE);
+    else this.enterGCD();
+  }
+
+  stopShieldChargeOnWall() {
+    if (this.state !== STATES.SHIELD_CHARGE) return;
+    this._shieldCharge = null;
+    this.body.setVelocity(0, 0);
+    Sfx.wallBump();
+    if (this._shieldChargeCounteredGuard) {
+      this._shieldChargeCounteredGuard = false;
+      this.setState(STATES.IDLE);
+    } else {
+      this.applyStun(WALL_STUN_MS);
+    }
+  }
+
+  // Shared cone-sweep melee visual — used by the swordsman's E kick and
+  // Knight's combo follow-up swing (only one of KICKING/COMBO_ATTACK is ever
+  // active at once, so both can safely share the one kickCone graphics
+  // object and draw method).
   _drawKickCone() {
     this.kickCone.clear();
-    if (this.state !== STATES.KICKING) return;
+    if (this.state === STATES.EMPOWERED_STRIKE) {
+      this._drawEmpoweredStrikeRect();
+      return;
+    }
+    let cfg;
+    let fillColor = 0xfff3b0;
+    let edgeColor = 0xffcc33;
+    if (this.state === STATES.KICKING) {
+      cfg = this.skills.eKick;
+    } else if (this.state === STATES.COMBO_ATTACK) {
+      cfg = this.skills.comboAttack;
+      fillColor = 0xffe8c2;
+      edgeColor = 0xd98c3a;
+    } else {
+      return;
+    }
 
-    const eKick = this.skills.eKick;
-    const halfAngle = Phaser.Math.DegToRad(eKick.HALF_ANGLE_DEG);
-    const elapsed = eKick.TOTAL_MS - this.stateTimer;
+    const halfAngle = Phaser.Math.DegToRad(cfg.HALF_ANGLE_DEG);
+    const elapsed = cfg.TOTAL_MS - this.stateTimer;
 
-    if (elapsed <= eKick.ACTIVE_MS) {
+    if (elapsed <= cfg.ACTIVE_MS) {
       // Swipe: the cone sweeps left-to-right across the active window instead
-      // of just appearing, so the kick reads as a strike rather than a stamp.
-      const t = Phaser.Math.Clamp(elapsed / eKick.ACTIVE_MS, 0, 1);
+      // of just appearing, so the hit reads as a strike rather than a stamp.
+      const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
       const sweepEnd = Phaser.Math.Linear(-halfAngle, halfAngle, t);
-      this.kickCone.fillStyle(0xfff3b0, 0.75);
-      this.kickCone.slice(0, 0, eKick.RANGE, -halfAngle, sweepEnd, false);
+      this.kickCone.fillStyle(fillColor, 0.75);
+      this.kickCone.slice(0, 0, cfg.RANGE, -halfAngle, sweepEnd, false);
       this.kickCone.fillPath();
-      this.kickCone.lineStyle(3, 0xffcc33, 0.9);
+      this.kickCone.lineStyle(3, edgeColor, 0.9);
       this.kickCone.beginPath();
-      this.kickCone.arc(0, 0, eKick.RANGE, -halfAngle, sweepEnd, false);
+      this.kickCone.arc(0, 0, cfg.RANGE, -halfAngle, sweepEnd, false);
       this.kickCone.strokePath();
     } else {
       // Recovery: cone fades out from full brightness.
-      const t = Phaser.Math.Clamp((elapsed - eKick.ACTIVE_MS) / (eKick.TOTAL_MS - eKick.ACTIVE_MS), 0, 1);
-      this.kickCone.fillStyle(0xffcc33, 0.35 * (1 - t));
-      this.kickCone.slice(0, 0, eKick.RANGE, -halfAngle, halfAngle, false);
+      const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
+      this.kickCone.fillStyle(edgeColor, 0.35 * (1 - t));
+      this.kickCone.slice(0, 0, cfg.RANGE, -halfAngle, halfAngle, false);
       this.kickCone.fillPath();
+    }
+  }
+
+  // Empowered Q's wide straight-line AOE, drawn in the combatant's own
+  // rotated local space (0,0 = character, +x = facing) so it always reads
+  // as "in front of me" regardless of current facing.
+  _drawEmpoweredStrikeRect() {
+    const cfg = this.skills.empoweredStrike;
+    const halfW = cfg.WIDTH / 2;
+    const elapsed = cfg.TOTAL_MS - this.stateTimer;
+
+    if (elapsed <= cfg.ACTIVE_MS) {
+      const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
+      this.kickCone.fillStyle(0xffe066, 0.6 * (1 - t * 0.3));
+      this.kickCone.fillRect(0, -halfW, cfg.LENGTH, cfg.WIDTH);
+      this.kickCone.lineStyle(3, 0xfff3b0, 0.9);
+      this.kickCone.strokeRect(0, -halfW, cfg.LENGTH, cfg.WIDTH);
+    } else {
+      const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
+      this.kickCone.fillStyle(0xffe066, 0.35 * (1 - t));
+      this.kickCone.fillRect(0, -halfW, cfg.LENGTH, cfg.WIDTH);
     }
   }
 
@@ -598,6 +901,17 @@ export default class Combatant extends Phaser.GameObjects.Container {
       this.auraRing.lineStyle(3, 0xff5c5c, 0.7 + 0.3 * Math.sin(this._clock * 0.02));
       this.auraRing.strokeCircle(0, 0, pulse);
     }
+
+    // Knight empowered-Q glow: persists through IDLE/movement (not tied to
+    // any one state), so it's checked independently of the block above —
+    // a small pulsing glow at the weapon tip, flickering faster as it nears
+    // expiry to telegraph "use it or lose it."
+    if (this._empoweredQMs > 0) {
+      const tip = this._displayPose?.tip || { x: 0, y: 0 };
+      const flicker = this._empoweredQMs < 1000 ? 0.5 + 0.5 * Math.sin(this._clock * 0.05) : 0.85;
+      this.auraRing.fillStyle(0xffe066, 0.55 * flicker);
+      this.auraRing.fillCircle(tip.x, tip.y, r * 0.28);
+    }
   }
 
   // Pose for the katana-wielding stick figure: grip/tip define the sword line,
@@ -616,9 +930,17 @@ export default class Combatant extends Phaser.GameObjects.Container {
     let headX = r * 0.25;
     let bob = 0; // forward/back torso bounce, only used by the walk cycle
     let swayRot = 0; // hip-sway rotation, only used by the walk cycle
+    // weaponStyle/shield are optional pose descriptors — default values keep
+    // the swordsman's silhouette byte-identical; Knight (comboDash/heldGuard)
+    // overrides them below.
+    const weaponStyle = this.skills.skillTypes.q === "comboDash" ? "hammer" : "blade";
+    let shield = null;
 
     switch (this.state) {
       case STATES.CHARGING: {
+        // Unreachable for comboDash classes (Knight) — they skip CHARGING
+        // entirely, see _tryStartSkills/_startComboDash. Only chargeDash
+        // (swordsman) ever renders this pose.
         const ratio = this.chargeTime / this.skills.qDash.MAX_CHARGE_MS;
         grip = { x: lerp(-r * 0.1, r * 0.55, ratio), y: lerp(-r * 0.3, -r * 0.1, ratio) };
         tip = { x: lerp(-r * 1.1, r * 1.9, ratio), y: lerp(-r * 0.6, -r * 0.2, ratio) };
@@ -628,18 +950,82 @@ export default class Combatant extends Phaser.GameObjects.Container {
         break;
       }
       case STATES.DASH:
-        grip = { x: r * 0.7, y: -r * 0.05 };
-        tip = { x: r * 2.3, y: -r * 0.35 };
-        footL = { x: r * 0.75, y: r * 0.3 };
-        footR = { x: -r * 1.35, y: -r * 0.35 };
-        headX = r * 0.45;
+        if (weaponStyle === "hammer") {
+          // Forward swing follow-through — the same strike silhouette as
+          // E's cone swing, instead of a blade-point lunge.
+          grip = { x: r * 0.4, y: r * 0.5 };
+          tip = { x: r * 1.5, y: r * 1.1 };
+          footL = { x: r * 0.5, y: -r * 0.3 };
+          footR = { x: -r * 1.1, y: r * 0.15 };
+          headX = r * 0.35;
+        } else {
+          grip = { x: r * 0.7, y: -r * 0.05 };
+          tip = { x: r * 2.3, y: -r * 0.35 };
+          footL = { x: r * 0.75, y: r * 0.3 };
+          footR = { x: -r * 1.35, y: -r * 0.35 };
+          headX = r * 0.45;
+        }
         break;
       case STATES.PARRYING:
         grip = { x: r * 0.35, y: -r * 0.4 };
         tip = { x: r * 0.35, y: r * 0.65 };
         footL = { x: -r * 0.5, y: -r * 0.55 };
         footR = { x: -r * 0.5, y: r * 0.55 };
+        if (this.skills.skillTypes.w === "heldGuard") {
+          shield = { x: r * 0.15, y: -r * 0.65, w: r * 0.22, h: r * 1.3 };
+        }
         break;
+      case STATES.SHIELD_CHARGE:
+        grip = { x: r * 0.55, y: -r * 0.05 };
+        tip = { x: r * 1.1, y: -r * 0.1 };
+        footL = { x: r * 0.6, y: r * 0.25 };
+        footR = { x: -r * 1.1, y: -r * 0.3 };
+        headX = r * 0.4;
+        shield = { x: r * 0.5, y: -r * 0.55, w: r * 0.24, h: r * 1.1 };
+        break;
+      case STATES.COMBO_WINDOW:
+        grip = { x: r * 0.1, y: r * 0.1 };
+        tip = { x: r * 0.5, y: r * 0.3 };
+        footL = { x: -r * 0.4, y: -r * 0.3 };
+        footR = { x: -r * 0.4, y: r * 0.3 };
+        break;
+      case STATES.COMBO_ATTACK: {
+        grip = { x: -r * 0.2, y: -r * 0.3 };
+        footL = { x: -r * 0.3, y: -r * 0.3 };
+        footR = { x: -r * 0.4, y: r * 0.3 };
+        const combo = this.skills.comboAttack;
+        const comboElapsed = combo.TOTAL_MS - this.stateTimer;
+        if (comboElapsed <= combo.ACTIVE_MS) {
+          const t = Phaser.Math.Clamp(comboElapsed / combo.ACTIVE_MS, 0, 1);
+          tip = { x: lerp(-r * 0.9, r * 1.6, t), y: lerp(-r * 0.5, r * 0.4, t) };
+        } else {
+          const t = Phaser.Math.Clamp(
+            (comboElapsed - combo.ACTIVE_MS) / (combo.TOTAL_MS - combo.ACTIVE_MS),
+            0,
+            1
+          );
+          tip = { x: lerp(r * 1.6, r * 0.2, t), y: lerp(r * 0.4, r * 0.6, t) };
+        }
+        break;
+      }
+      case STATES.EMPOWERED_STRIKE: {
+        // Big rooted overhead-to-forward smash — the character doesn't
+        // travel anywhere, only the hammer arcs down across the line AOE.
+        const cfg = this.skills.empoweredStrike;
+        const elapsed = cfg.TOTAL_MS - this.stateTimer;
+        footL = { x: r * 0.3, y: -r * 0.4 };
+        footR = { x: -r * 0.5, y: r * 0.4 };
+        headX = r * 0.3;
+        if (elapsed <= cfg.ACTIVE_MS) {
+          const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
+          grip = { x: lerp(-r * 0.3, r * 0.6, t), y: lerp(-r * 0.9, r * 0.5, t) };
+          tip = { x: lerp(-r * 1.0, r * 2.4, t), y: lerp(-r * 1.3, r * 0.85, t) };
+        } else {
+          grip = { x: r * 0.6, y: r * 0.5 };
+          tip = { x: r * 2.4, y: r * 0.85 };
+        }
+        break;
+      }
       case STATES.KICKING: {
         grip = { x: -r * 0.25, y: r * 0.25 };
         tip = { x: -r * 1.0, y: r * 0.55 };
@@ -682,7 +1068,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
       }
     }
 
-    return { grip, tip, footL, footR, headX, bob, swayRot };
+    return { grip, tip, footL, footR, headX, bob, swayRot, weaponStyle, shield };
   }
 
   // Smooths the raw per-state target pose toward what's actually drawn each
@@ -714,7 +1100,10 @@ export default class Combatant extends Phaser.GameObjects.Container {
     p.headX = Phaser.Math.Linear(p.headX, target.headX, k);
     p.bob = Phaser.Math.Linear(p.bob || 0, target.bob || 0, k);
     p.swayRot = Phaser.Math.Linear(p.swayRot || 0, target.swayRot || 0, k);
-    const { grip, tip, footL, footR, headX, bob, swayRot } = p;
+    // Categorical/rect fields — no lerp, just adopt this frame's target.
+    p.weaponStyle = target.weaponStyle;
+    p.shield = target.shield;
+    const { grip, tip, footL, footR, headX, bob, swayRot, weaponStyle, shield } = p;
 
     const hip = { x: -r * 0.2 + bob, y: 0 };
     const neck = { x: r * 0.05 + bob, y: 0 };
@@ -723,7 +1112,13 @@ export default class Combatant extends Phaser.GameObjects.Container {
       this.state === STATES.STUNNED ? Math.sin(this._clock * 0.02) * 0.12 : swayRot
     );
 
-    g.lineStyle(4, 0xe8e8f0, 0.95);
+    const armored = weaponStyle === "hammer";
+    // Knight reads heavier/metallic (thicker, steel-grey strokes) instead of
+    // the swordsman's lighter off-white — plate armor vs. cloth.
+    const limbColor = armored ? 0xb0b6c2 : 0xe8e8f0;
+    const limbWidth = armored ? 5 : 4;
+
+    g.lineStyle(limbWidth, limbColor, 0.95);
     g.beginPath();
     g.moveTo(hip.x, hip.y);
     g.lineTo(footL.x, footL.y);
@@ -736,45 +1131,155 @@ export default class Combatant extends Phaser.GameObjects.Container {
     // Shoulder crossbar, perpendicular to facing — reads as a torso viewed
     // from above instead of a single front-to-back line (which looks like a
     // creature crawling rather than a person seen from overhead).
-    g.lineStyle(3.5, 0xe8e8f0, 0.95);
+    g.lineStyle(armored ? 4.5 : 3.5, limbColor, 0.95);
     g.beginPath();
     g.moveTo(neck.x, -r * 0.3);
     g.lineTo(neck.x, r * 0.3);
     g.strokePath();
 
-    g.lineStyle(3, 0xe8e8f0, 0.95);
+    if (armored) {
+      // Chest plate: a small diamond straddling the shoulder line, reading
+      // as breastplate bulk instead of a bare torso line.
+      g.fillStyle(0x8a909c, 0.9);
+      g.fillPoints(
+        [
+          { x: neck.x + r * 0.16, y: 0 },
+          { x: neck.x, y: -r * 0.22 },
+          { x: neck.x - r * 0.1, y: 0 },
+          { x: neck.x, y: r * 0.22 },
+        ],
+        true
+      );
+    }
+
+    g.lineStyle(3, limbColor, 0.95);
     g.beginPath();
     g.moveTo(neck.x, neck.y);
     g.lineTo(grip.x, grip.y);
     g.strokePath();
 
-    g.lineStyle(3, 0xd7dcec, 1);
-    g.beginPath();
-    g.moveTo(grip.x, grip.y);
-    g.lineTo(tip.x, tip.y);
-    g.strokePath();
-    g.fillStyle(0xd4af37, 0.9);
-    g.fillCircle(grip.x, grip.y, 2.6);
+    if (armored) {
+      // Wooden haft (grip -> tip), metal head drawn separately below at tip —
+      // two-tone reads as a hammer, not a uniform blade.
+      g.lineStyle(4, 0x6b4a2b, 1);
+      g.beginPath();
+      g.moveTo(grip.x, grip.y);
+      g.lineTo(tip.x, tip.y);
+      g.strokePath();
+      g.fillStyle(0x4a3320, 0.9);
+      g.fillCircle(grip.x, grip.y, 2.8);
+    } else {
+      g.lineStyle(3, 0xd7dcec, 1);
+      g.beginPath();
+      g.moveTo(grip.x, grip.y);
+      g.lineTo(tip.x, tip.y);
+      g.strokePath();
+      g.fillStyle(0xd4af37, 0.9);
+      g.fillCircle(grip.x, grip.y, 2.6);
+    }
 
+    if (armored) {
+      // A short rectangle perpendicular to the haft at the tip end, reading
+      // as a hammer head rather than a blade point. Glows yellow while the
+      // empowered-Q buff is active (or during the empowered strike itself).
+      const angle = Math.atan2(tip.y - grip.y, tip.x - grip.x);
+      const fx = Math.cos(angle);
+      const fy = Math.sin(angle);
+      const px = -fy;
+      const py = fx;
+      const halfLen = 8;
+      const halfW = 6;
+      const empowered = this._empoweredQMs > 0 || this.state === STATES.EMPOWERED_STRIKE;
+      g.fillStyle(empowered ? 0xffe066 : 0x74777f, 1);
+      g.fillPoints(
+        [
+          { x: tip.x + fx * halfLen + px * halfW, y: tip.y + fy * halfLen + py * halfW },
+          { x: tip.x + fx * halfLen - px * halfW, y: tip.y + fy * halfLen - py * halfW },
+          { x: tip.x - fx * halfLen - px * halfW, y: tip.y - fy * halfLen - py * halfW },
+          { x: tip.x - fx * halfLen + px * halfW, y: tip.y - fy * halfLen + py * halfW },
+        ],
+        true
+      );
+      g.lineStyle(1, empowered ? 0xfff3b0 : 0x3f4147, 0.9);
+      g.strokePoints(
+        [
+          { x: tip.x + fx * halfLen + px * halfW, y: tip.y + fy * halfLen + py * halfW },
+          { x: tip.x + fx * halfLen - px * halfW, y: tip.y + fy * halfLen - py * halfW },
+          { x: tip.x - fx * halfLen - px * halfW, y: tip.y - fy * halfLen - py * halfW },
+          { x: tip.x - fx * halfLen + px * halfW, y: tip.y - fy * halfLen + py * halfW },
+        ],
+        true
+      );
+    }
+
+    // Head shape is a per-class visual pick (CLASSES[classId].visual.headShape),
+    // independent of weapon/skillTypes — e.g. Knight reads "square" (a
+    // helmet silhouette); future classes can pick their own so every class
+    // is tellable apart at a glance without reading the HUD.
+    const headShape = this.skills.visual?.headShape || "circle";
+    const headR = r * 0.32;
     g.fillStyle(this.color, 1);
-    g.fillCircle(headX, 0, r * 0.32);
     g.lineStyle(2, 0xffffff, 0.6);
-    g.strokeCircle(headX, 0, r * 0.32);
+    if (headShape === "square") {
+      g.fillRect(headX - headR, -headR, headR * 2, headR * 2);
+      g.strokeRect(headX - headR, -headR, headR * 2, headR * 2);
+    } else {
+      g.fillCircle(headX, 0, headR);
+      g.strokeCircle(headX, 0, headR);
+    }
+    if (armored) {
+      // Helmet brow line — a bar across the upper head reads as a
+      // visor/helm rim instead of a bare head.
+      g.lineStyle(2, 0xb0b6c2, 0.85);
+      g.beginPath();
+      if (headShape === "square") {
+        g.moveTo(headX - headR, -headR * 0.15);
+        g.lineTo(headX + headR, -headR * 0.15);
+      } else {
+        g.arc(headX, 0, headR, Math.PI * 1.15, Math.PI * 1.85, false);
+      }
+      g.strokePath();
+    }
+
+    if (shield) {
+      // Tower shield, off-hand-front. A metal boss + rivet line reads as a
+      // real shield face, and a pulsing yellow-outline "light" effect reads
+      // as active blocking, per the design doc.
+      const glow = 0.5 + 0.5 * Math.sin(this._clock * 0.02);
+      g.fillStyle(0x8fa8c8, 0.92);
+      g.fillRoundedRect(shield.x, shield.y, shield.w, shield.h, 3);
+      const cx = shield.x + shield.w / 2;
+      const cy = shield.y + shield.h / 2;
+      g.lineStyle(1.5, 0x5c6a80, 0.7);
+      g.beginPath();
+      g.moveTo(cx, shield.y);
+      g.lineTo(cx, shield.y + shield.h);
+      g.strokePath();
+      g.fillStyle(0xd8dee8, 0.95);
+      g.fillCircle(cx, cy, Math.min(shield.w, shield.h) * 0.16);
+      g.lineStyle(2, 0xffe066, 0.35 + 0.35 * glow);
+      g.strokeRoundedRect(shield.x, shield.y, shield.w, shield.h, 3);
+    }
   }
 
   // A streaked silhouette left behind every ~22ms during the dash — an
-  // elongated body blob plus a bright blade-line, both oriented along the
+  // elongated body blob plus a bright accent line, both oriented along the
   // dash direction, reads as a motion afterimage rather than a plain dot.
+  // The accent line is a thin blade streak for the swordsman, but a chunkier
+  // dull-metal smear for Knight — a hammer has no blade edge to catch light.
   _updateAfterimages(dtMs) {
     this._afterimageClock -= dtMs;
     if (this._afterimageClock > 0) return;
     this._afterimageClock = 22;
 
     const r = PLAYER.RADIUS;
+    const armored = this.skills.skillTypes.q === "comboDash";
     const ghost = this.scene.add.container(this.x, this.y).setRotation(this.rotation).setDepth(1);
     const body = this.scene.add.ellipse(0, 0, r * 1.9, r * 1.1, this.color, 0.32);
-    const blade = this.scene.add.rectangle(r * 1.1, 0, r * 2.2, 2, 0xd7dcec, 0.45);
-    ghost.add([body, blade]);
+    const accent = armored
+      ? this.scene.add.rectangle(r * 0.9, 0, r * 1.5, 5, 0x8a909c, 0.4)
+      : this.scene.add.rectangle(r * 1.1, 0, r * 2.2, 2, 0xd7dcec, 0.45);
+    ghost.add([body, accent]);
     this.scene.tweens.add({
       targets: ghost,
       alpha: 0,

@@ -5,6 +5,7 @@ import {
   RING_OUT_MARGIN,
   FLOOR_CORNER_CUT,
   ROUND_BANNER_MS,
+  DEFAULT_CLASS_ID,
 } from "../config/constants.js";
 import { generateSymmetricLayout } from "../config/layoutGenerator.js";
 import Player from "../entities/Player.js";
@@ -26,6 +27,15 @@ export default class ArenaScene extends Phaser.Scene {
     this.load.audio("wSuccess", "assets/audio/Wsucces.mp3");
     this.load.audio("terrainAppear", "assets/audio/sand_appear_sound.mp3");
 
+    // Knight (기사) — see Sfx.js's comboDashRelease/shieldRaise/shieldChargeRelease/
+    // comboSwing/comboHit/empoweredQRelease.
+    this.load.audio("knightQ1", "assets/audio/knight_Q1.mp3");
+    this.load.audio("knightQ2", "assets/audio/knight_Q2.mp3");
+    this.load.audio("knightQSwoosh", "assets/audio/knight_Q_swoosh.mp3");
+    this.load.audio("knightPowerdQ", "assets/audio/knight_powerdQ.mp3");
+    this.load.audio("knightE", "assets/audio/knight_E.mp3");
+    this.load.audio("knightW", "assets/audio/knight_W.mp3");
+
     this.load.image("arenaVoid", "assets/images/arena_void.png");
     this.load.image("arenaTile", "assets/images/arena_tile.png");
     this.load.image("arenaObs", "assets/images/arena_obs.png");
@@ -40,7 +50,10 @@ export default class ArenaScene extends Phaser.Scene {
     this._buildObstacles();
     this._buildHazards();
 
-    this.player = new Player(this, ARENA.WIDTH * 0.25, ARENA.HEIGHT / 2);
+    // Bare test class-select (see _selectClass) — no persistence, resets to
+    // the default on every scene reload, same lifecycle as everything else.
+    this.selectedClassId = DEFAULT_CLASS_ID;
+    this.player = new Player(this, ARENA.WIDTH * 0.25, ARENA.HEIGHT / 2, this.selectedClassId);
     this.dummy = new Dummy(this, ARENA.WIDTH * 0.75, ARENA.HEIGHT / 2);
     this.combatants = [this.player, this.dummy];
     // Held locked behind the title screen until the player hits "시작하기" —
@@ -53,8 +66,8 @@ export default class ArenaScene extends Phaser.Scene {
     this.cameras.main.setBounds(0, 0, ARENA.WIDTH, ARENA.HEIGHT);
     this.cameras.main.startFollow(this.player, true, 0.12, 0.12);
 
-    this.physics.add.collider(this.player, this.walls, (obj) => obj.stopDashOnWall());
-    this.physics.add.collider(this.dummy, this.walls, (obj) => obj.stopDashOnWall());
+    this.physics.add.collider(this.player, this.walls, (obj) => obj.handleWallStop());
+    this.physics.add.collider(this.dummy, this.walls, (obj) => obj.handleWallStop());
     this.physics.add.collider(this.player, this.dummy, null, (a, b) => this._shouldBodyBlock(a, b));
 
     this.mode = "round"; // "round" | "deathmatch"
@@ -89,12 +102,40 @@ export default class ArenaScene extends Phaser.Scene {
 
     this.hitstopMs = 0; // brief full-freeze on big impacts (kill/parry/counter-kick)
 
+    this.classSwordsmanBtn = document.getElementById("classSwordsmanBtn");
+    this.classKnightBtn = document.getElementById("classKnightBtn");
+    this.classSwordsmanBtn.onclick = () => this._selectClass("swordsman");
+    this.classKnightBtn.onclick = () => this._selectClass("knight");
+    this.classSwordsmanBtn.classList.toggle("active", this.selectedClassId === "swordsman");
+    this.classKnightBtn.classList.toggle("active", this.selectedClassId === "knight");
+
     const titleScreen = document.getElementById("titleScreen");
     document.getElementById("startBtn").onclick = () => {
       titleScreen.classList.add("hidden");
       unlockAudio();
       this._startCountdown();
     };
+  }
+
+  // Bare test class-select: the Player is already constructed by the time
+  // the title screen renders, so switching classes here destroys and
+  // recreates it (only ever happens pre-match, while locked) rather than
+  // threading a mid-life class change through Combatant itself — Stage 2a is
+  // single-player-only scaffolding for testing, not the real Stage-3 UI.
+  _selectClass(classId) {
+    if (this.selectedClassId === classId) return;
+    this.selectedClassId = classId;
+    this.classSwordsmanBtn.classList.toggle("active", classId === "swordsman");
+    this.classKnightBtn.classList.toggle("active", classId === "knight");
+
+    const wasLocked = this.player.locked;
+    this.player.destroyEntity();
+    this.player = new Player(this, ARENA.WIDTH * 0.25, ARENA.HEIGHT / 2, classId);
+    this.player.locked = wasLocked;
+    this.combatants[0] = this.player;
+    this.cameras.main.startFollow(this.player, true, 0.12, 0.12);
+    this.physics.add.collider(this.player, this.walls, (obj) => obj.handleWallStop());
+    this.physics.add.collider(this.player, this.dummy, null, (a, b) => this._shouldBodyBlock(a, b));
   }
 
   // Switches between ROUND (freeze + banner + reset-both after each death)
@@ -446,6 +487,7 @@ export default class ArenaScene extends Phaser.Scene {
   _shouldBodyBlock(a, b) {
     if (!a.isAlive || !b.isAlive) return false;
     if (a.state === STATES.DASH || b.state === STATES.DASH) return false;
+    if (a.state === STATES.SHIELD_CHARGE || b.state === STATES.SHIELD_CHARGE) return false;
     return true;
   }
 
@@ -501,6 +543,9 @@ export default class ArenaScene extends Phaser.Scene {
 
     this._checkDashHits();
     this._checkKicks();
+    this._checkComboAttack();
+    this._checkShieldCharge();
+    this._checkEmpoweredStrike();
     this._checkHazardDeaths();
 
     if (this.mode === "round") this._checkRoundEnd();
@@ -580,13 +625,18 @@ export default class ArenaScene extends Phaser.Scene {
     this.roundBannerEl.classList.remove("show");
   }
 
+  // Class-agnostic: reads the outcome fields resolved onto dasher._dash at
+  // release time (see Combatant._releaseDash) instead of assuming every Q
+  // dash is an instakill piercing hit — the swordsman's dash is (lethal,
+  // pierce), Knight's comboDash is (knockback, non-piercing) unless empowered.
   _checkDashHits() {
     for (const dasher of this.combatants) {
-      if (dasher.state !== STATES.DASH) continue;
+      if (dasher.state !== STATES.DASH || !dasher._dash) continue;
       for (const other of this.combatants) {
         if (other === dasher || !other.isAlive) continue;
+        const hitRadius = (dasher.radius + other.radius) * (dasher._dash.widthMultiplier || 1);
         const dist = Phaser.Math.Distance.Between(dasher.x, dasher.y, other.x, other.y);
-        if (dist > dasher.radius + other.radius) continue;
+        if (dist > hitRadius) continue;
 
         if (other.state === STATES.PARRYING) {
           if (other.parrySuccess()) {
@@ -595,10 +645,15 @@ export default class ArenaScene extends Phaser.Scene {
             this.cameras.main.shake(90, 0.005);
             this.hitstopMs = 70;
           }
-        } else {
+        } else if (dasher._dash.lethal) {
           other.kill(dasher.facing);
           dasher.markDashKill();
           this.hitstopMs = 90;
+        } else {
+          other.applyKnockback(dasher.facing, dasher._dash.knockbackDistance, dasher._dash.knockbackSpeed);
+          this._spawnImpactBurst(other.x, other.y, 0xff9f43, { ringR: 28, bits: 5, dist: 26 });
+          this.hitstopMs = 55;
+          if (!dasher._dash.pierce) dasher._dash.remaining = 0; // stop right at the hit
         }
       }
     }
@@ -635,11 +690,129 @@ export default class ArenaScene extends Phaser.Scene {
     }
   }
 
+  // Empowered Q: a stationary rectangle hit-test along the attacker's facing
+  // direction — projects each target's offset onto the facing axis (along)
+  // and its perpendicular (perp) instead of a circle/cone check, since this
+  // is a straight-line AOE, not a point or an arc. Still loses to a raised
+  // shield (same triangle edge as the base Q dash and the combo follow-up);
+  // a clean hit on anyone else is an instakill.
+  _checkEmpoweredStrike() {
+    for (const attacker of this.combatants) {
+      if (!attacker.isEmpoweredStrikeActive) continue;
+      const cfg = attacker.skills.empoweredStrike;
+      const halfW = cfg.WIDTH / 2;
+      const cos = Math.cos(attacker.facing);
+      const sin = Math.sin(attacker.facing);
+      for (const target of this.combatants) {
+        if (target === attacker || !target.isAlive) continue;
+        const relX = target.x - attacker.x;
+        const relY = target.y - attacker.y;
+        const along = relX * cos + relY * sin;
+        const perp = -relX * sin + relY * cos;
+        if (along < -target.radius || along > cfg.LENGTH + target.radius) continue;
+        if (Math.abs(perp) > halfW + target.radius) continue;
+
+        if (target.state === STATES.PARRYING) {
+          if (target.parrySuccess()) {
+            attacker.applyStun();
+            this._spawnImpactBurst(target.x, target.y, 0x7ff0ff, { ringR: 42, bits: 8, dist: 42 });
+            this.cameras.main.shake(90, 0.005);
+            this.hitstopMs = 70;
+          }
+          attacker.markEmpoweredStrikeApplied();
+          continue;
+        }
+
+        target.kill(attacker.facing);
+        attacker.markEmpoweredStrikeApplied();
+        this._spawnImpactBurst(target.x, target.y, 0xffe066, { ringR: 40, bits: 8, dist: 40 });
+        this.hitstopMs = 100;
+      }
+    }
+  }
+
+  // Knight combo follow-up swing — same cone hit-test shape as _checkKicks,
+  // over the comboAttack tuning instead of eKick. It's a Q-family strike, so
+  // it still loses to a raised shield (same triangle edge as the base Q
+  // dash) — but a clean hit on anyone else is an instakill, not knockback.
+  _checkComboAttack() {
+    for (const attacker of this.combatants) {
+      if (!attacker.isComboAttackActive) continue;
+      const combo = attacker.skills.comboAttack;
+      const halfAngle = Phaser.Math.DegToRad(combo.HALF_ANGLE_DEG);
+      for (const target of this.combatants) {
+        if (target === attacker || !target.isAlive) continue;
+        const dist = Phaser.Math.Distance.Between(attacker.x, attacker.y, target.x, target.y);
+        if (dist > combo.RANGE + target.radius) continue;
+        const angleToTarget = Phaser.Math.Angle.Between(attacker.x, attacker.y, target.x, target.y);
+        const diff = Phaser.Math.Angle.Wrap(angleToTarget - attacker.facing);
+        if (Math.abs(diff) > halfAngle) continue;
+
+        if (target.state === STATES.PARRYING) {
+          if (target.parrySuccess()) {
+            attacker.applyStun();
+            this._spawnImpactBurst(target.x, target.y, 0x7ff0ff, { ringR: 42, bits: 8, dist: 42 });
+            this.cameras.main.shake(90, 0.005);
+            this.hitstopMs = 70;
+          }
+          continue;
+        }
+
+        target.kill(attacker.facing);
+        attacker.markComboHitApplied();
+        this._spawnImpactBurst(target.x, target.y, 0xd98c3a, { ringR: 32, bits: 6, dist: 32 });
+        this.hitstopMs = 90;
+      }
+    }
+  }
+
+  // Knight shield charge (E) — a short forward dash-charge; hitting a
+  // W-active (guarding) target beats it (same triangle edge as E-beats-W
+  // elsewhere) for stronger knockback + a stun, GCD-exempt.
+  _checkShieldCharge() {
+    for (const charger of this.combatants) {
+      if (charger.state !== STATES.SHIELD_CHARGE || !charger._shieldCharge) continue;
+      const cfg = charger.skills.eShieldCharge;
+      for (const target of this.combatants) {
+        if (target === charger || !target.isAlive) continue;
+        const dist = Phaser.Math.Distance.Between(charger.x, charger.y, target.x, target.y);
+        if (dist > charger.radius + target.radius) continue;
+
+        const vsGuard = target.state === STATES.PARRYING;
+        if (vsGuard) {
+          target.applyStun(cfg.VS_GUARD_STUN_MS);
+          target.applyKnockback(charger.facing, cfg.VS_GUARD_KNOCKBACK_DISTANCE, cfg.VS_GUARD_KNOCKBACK_SPEED);
+          this._spawnImpactBurst(target.x, target.y, 0xff5c5c, { ringR: 40, bits: 8, dist: 38 });
+          this.hitstopMs = 85;
+        } else {
+          target.applyKnockback(charger.facing, cfg.KNOCKBACK_DISTANCE, cfg.KNOCKBACK_SPEED);
+          this._spawnImpactBurst(target.x, target.y, 0x8fa8c8, { ringR: 26, bits: 5, dist: 26 });
+          this.hitstopMs = 50;
+        }
+        charger.markShieldChargeApplied(vsGuard);
+        charger._shieldCharge.remaining = 0; // stop right at the hit, non-piercing
+      }
+    }
+  }
+
+  // Keyed by skills.skillTypes.{q,w,e} values so a future class only needs
+  // an entry here, not a new branch.
+  static SKILL_LABELS = {
+    chargeDash: "발도술",
+    comboDash: "해머 돌진",
+    tapParry: "반격자세",
+    heldGuard: "방패 들기",
+    kickCone: "발차기",
+    shieldCharge: "방패 돌진",
+  };
+
   _updateHud() {
     if (!this.hud) return;
     const p = this.player;
+    const labels = ArenaScene.SKILL_LABELS;
+    const t = p.skills.skillTypes;
     this.hud.textContent =
-      `L-Click Hold: 이동 (커서 방향)   Q: 발도술(홀드/릴리즈)   W: 반격자세   E: 발차기\n` +
+      `L-Click Hold: 이동 (커서 방향)   Q: ${labels[t.q]}   W: ${labels[t.w]}   E: ${labels[t.e]}\n` +
       `Player: ${p.state}${p.state === STATES.CHARGING ? ` (${(p.chargeTime / 1000).toFixed(2)}s)` : ""}  alive=${p.isAlive}\n` +
       `Dummy:  ${this.dummy.state}  alive=${this.dummy.isAlive}`;
 
@@ -660,22 +833,27 @@ export default class ArenaScene extends Phaser.Scene {
         ? STUN_FILL
         : p.state === STATES.CHARGING
         ? { pct: (p.chargeTime / p.skills.qDash.MAX_CHARGE_MS) * 100, color: "#ff9f43", active: true }
-        : p.state === STATES.DASH
-        ? { pct: 100, color: "#ff9f43", active: true }
+        : p.state === STATES.DASH ||
+          p.state === STATES.COMBO_WINDOW ||
+          p.state === STATES.COMBO_ATTACK ||
+          p.state === STATES.EMPOWERED_STRIKE
+        ? { pct: 100, color: p.state === STATES.EMPOWERED_STRIKE ? "#ffe066" : "#ff9f43", active: true }
         : p.state === STATES.GCD
         ? GCD_FILL
         : READY,
       W: stunned
         ? STUN_FILL
         : p.state === STATES.PARRYING
-        ? { pct: 100, color: "#7ff0ff", active: true }
+        ? p.skills.skillTypes.w === "heldGuard"
+          ? { pct: (p.stateTimer / p.skills.wParry.MAX_HOLD_MS) * 100, color: "#7ff0ff", active: true }
+          : { pct: 100, color: "#7ff0ff", active: true }
         : p.state === STATES.GCD
         ? GCD_FILL
         : READY,
       E: stunned
         ? STUN_FILL
-        : p.state === STATES.KICKING
-        ? { pct: 100, color: "#ffcc33", active: true }
+        : p.state === STATES.KICKING || p.state === STATES.SHIELD_CHARGE
+        ? { pct: 100, color: p.state === STATES.SHIELD_CHARGE ? "#8fa8c8" : "#ffcc33", active: true }
         : p.state === STATES.GCD
         ? GCD_FILL
         : READY,
@@ -688,5 +866,6 @@ export default class ArenaScene extends Phaser.Scene {
       this.skillSlots[key].style.color = color;
       this.skillSlots[key].classList.toggle("active", active);
     }
+    this.skillSlots.Q.classList.toggle("empowered", p._empoweredQMs > 0);
   }
 }
