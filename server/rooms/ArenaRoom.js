@@ -144,11 +144,21 @@ class ArenaRoom extends Room {
     this.onMessage("input", (client, msg) => {
       const s = this.scratch.get(client.sessionId);
       if (!s) return;
+      const player = this.state.players.get(client.sessionId);
       if (typeof msg.wantsMove === "boolean") s.wantsMove = msg.wantsMove;
       if (typeof msg.aimAngle === "number") s.aimAngle = msg.aimAngle;
       if (typeof msg.qHeld === "boolean") s.qHeld = msg.qHeld;
-      if (msg.wPressed) s.wPressed = true;
-      if (msg.ePressed) s.ePressed = true;
+      // Only latch W/E while actually IDLE — tryStartSkills() is the sole
+      // consumer and only runs from that state. Without this guard, a
+      // press during GCD/CHARGING/DASH/PARRYING/KICKING/STUNNED sat on the
+      // flag until the player next reached IDLE and fired there completely
+      // unprompted (often well after the key was released), which is what
+      // read as "input eaten, then stutters" under key-mashing — the client
+      // predicts nothing here (PredictedSelf only calls _tryStartSkills
+      // from IDLE, non-latching), so this also removes a client/server
+      // prediction mismatch, not just the surprise fire.
+      if (msg.wPressed && player && player.state === C.STATES.IDLE) s.wPressed = true;
+      if (msg.ePressed && player && player.state === C.STATES.IDLE) s.ePressed = true;
     });
 
     this.setSimulationInterval((dtMs) => this.tick(dtMs), C.SIMULATION_INTERVAL_MS);
