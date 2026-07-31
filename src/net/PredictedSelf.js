@@ -1,13 +1,4 @@
-import {
-  PLAYER,
-  Q_DASH,
-  W_PARRY,
-  E_KICK,
-  GLOBAL_COOLDOWN_MS,
-  FAILED_PARRY_GCD_MULTIPLIER,
-  SLOW_ZONE_FACTOR,
-  STATES,
-} from "../config/constants.js";
+import { PLAYER, Q_DASH, SLOW_ZONE_FACTOR, STATES } from "../config/constants.js";
 
 // Client-side prediction for the LOCAL player only — a physics/rendering-free
 // mirror of server/rooms/ArenaRoom.js's stepPlayer()/tryStartSkills() (which
@@ -50,7 +41,6 @@ export default class PredictedSelf {
     this._lastLoggedState = null; // DEBUG-only, see reconcile()
 
     this._dash = null; // { dx, dy, remaining }
-    this._stateTimer = 0;
   }
 
   // Seeds/replaces predicted state wholesale from an authoritative snapshot
@@ -97,21 +87,22 @@ export default class PredictedSelf {
         this._stepDash(dtMs, hazards);
         break;
       case STATES.PARRYING:
-        this._stateTimer -= dtMs;
-        if (this._stateTimer <= 0) this._enterGCD(FAILED_PARRY_GCD_MULTIPLIER);
-        break;
       case STATES.KICKING:
-        this._stateTimer -= dtMs;
-        if (this._stateTimer <= 0) this._enterGCD(1);
+        // Deliberately NOT self-timed out here (previously via a local
+        // _stateTimer counting down to _enterGCD()) — that duration isn't
+        // part of the synced schema, so every reconcile() had to guess a
+        // fresh countdown, and replaying a bigger-than-usual backlog (a
+        // network hiccup) could overshoot it before the server's own
+        // confirmation caught up. The server then re-showing PARRYING
+        // read as "entering fresh", re-guessed another countdown, and
+        // could overshoot again — a real ping-pong that fired the entry
+        // SFX/pose repeatedly for one press. The server's own state flip
+        // (see reconcile()) is what ends these now; entry is still
+        // predicted instantly above, just not the exit.
         break;
       default:
         break;
     }
-  }
-
-  _enterGCD(multiplier) {
-    this.state = STATES.GCD;
-    this.globalCooldown = GLOBAL_COOLDOWN_MS * multiplier;
   }
 
   _moveLike(dtMs, input, baseSpeed, hazards) {
@@ -130,12 +121,10 @@ export default class PredictedSelf {
     }
     if (input.wPressed) {
       this.state = STATES.PARRYING;
-      this._stateTimer = W_PARRY.DURATION_MS;
       return;
     }
     if (input.ePressed) {
       this.state = STATES.KICKING;
-      this._stateTimer = E_KICK.TOTAL_MS;
     }
   }
 
@@ -158,12 +147,15 @@ export default class PredictedSelf {
   // rule) — only walls can stop it. A wall hit freezes into STUNNED
   // immediately (the dash-stop itself is fully our own doing and safe to
   // predict); the exact stun duration/recovery is left to the server's next
-  // snapshot rather than guessed here.
+  // snapshot rather than guessed here. Running out of distance deliberately
+  // does NOT self-transition to GCD here (see the PARRYING/KICKING comment
+  // in step() — same class of bug: distance is a client-only guess when
+  // reconstructed mid-flight from a snapshot, and letting replay decide
+  // "done" from a guessed value could overshoot and ping-pong against the
+  // server's own state). It just stops advancing and holds the dash pose
+  // until reconcile()'s next snapshot says otherwise.
   _stepDash(dtMs, hazards) {
-    if (!this._dash) {
-      this._enterGCD(1);
-      return;
-    }
+    if (!this._dash) return;
     const totalStep = Math.min((Q_DASH.SPEED * dtMs) / 1000, this._dash.remaining);
     const subSteps = Math.max(1, Math.ceil(totalStep / MOVE_STEP_LIMIT));
     const perStep = totalStep / subSteps;
@@ -179,11 +171,6 @@ export default class PredictedSelf {
       this.x = nx;
       this.y = ny;
       this._dash.remaining -= perStep;
-    }
-
-    if (this._dash.remaining <= 0.01) {
-      this._dash = null;
-      this._enterGCD(1);
     }
   }
 
@@ -233,7 +220,6 @@ export default class PredictedSelf {
     while (pendingInputs.length && pendingInputs[0].seq <= confirmedSeq) pendingInputs.shift();
 
     // Always start from the server's authoritative truth...
-    const wasAlreadyInState = this.state === snap.state;
     this.x = snap.x;
     this.y = snap.y;
     this.angle = snap.angle;
@@ -242,25 +228,16 @@ export default class PredictedSelf {
     this.globalCooldown = snap.globalCooldown || 0;
     this.isAlive = snap.isAlive;
     this.score = snap.score;
-    // PARRYING/KICKING/DASH's remaining duration (_stateTimer) and DASH's
-    // direction/distance (_dash) are local-only bookkeeping the synced
-    // schema doesn't carry — they're normally set by _tryStartSkills()/
-    // _stepCharging() when we predict entering these states ourselves.
-    // Landing in one of them straight from a snapshot (the input that
-    // triggered it already got confirmed and trimmed out of the replay
-    // queue, so that entry code never reran) left them stale — often
-    // already <= 0 — so the very first replay step saw "time's up" and
-    // collapsed straight back to GCD, which read as Q/W/E never firing.
-    // Only re-seed on a fresh entry into the state (it wasn't what we were
-    // already predicting) — resetting on every single reconcile call (this
-    // fires up to ~30/s) would keep stomping the natural countdown that
-    // ordinary per-frame step() calls are making between reconciles.
-    if (snap.state === STATES.PARRYING && !wasAlreadyInState) this._stateTimer = W_PARRY.DURATION_MS;
-    else if (snap.state === STATES.KICKING && !wasAlreadyInState) this._stateTimer = E_KICK.TOTAL_MS;
+    // DASH's direction/distance (_dash) is local-only bookkeeping the
+    // synced schema doesn't carry. Landing in DASH straight from a
+    // snapshot (the input that triggered it already got confirmed and
+    // trimmed out of the replay queue, so _stepCharging() never reran) has
+    // no real value to reconstruct from — guess a full-range dash along
+    // the synced angle; precision doesn't matter since _stepDash() no
+    // longer self-ends on distance (see its comment), only reconcile()
+    // moves us out of DASH now, same as PARRYING/KICKING.
     if (snap.state === STATES.DASH) {
-      if (!wasAlreadyInState || !this._dash) {
-        this._dash = { dx: Math.cos(snap.angle), dy: Math.sin(snap.angle), remaining: Q_DASH.MAX_DISTANCE };
-      }
+      this._dash = this._dash || { dx: Math.cos(snap.angle), dy: Math.sin(snap.angle), remaining: Q_DASH.MAX_DISTANCE };
     } else {
       this._dash = null;
     }
