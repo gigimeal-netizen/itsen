@@ -39,6 +39,11 @@ export default class PredictedSelf {
     this.isAlive = true;
     this.score = 0;
     this.classId = null; // set from the first snapshot in adopt() — NetFighter reads this like any other snapshot field
+    // Knight-only buff flag, never locally predicted (see _tryStartSkills'
+    // comboDash comment — the buff itself isn't part of what's predicted),
+    // just mirrored straight from the server so NetFighter's hammer-glow
+    // read (snapshot.empoweredQActive) works for the local player too.
+    this.empoweredQActive = false;
     this._lastLoggedState = null; // DEBUG-only, see reconcile()
 
     this._dash = null; // { dx, dy, remaining }
@@ -73,6 +78,7 @@ export default class PredictedSelf {
     this.isAlive = snap.isAlive;
     this.score = snap.score;
     this.classId = snap.classId;
+    this.empoweredQActive = snap.empoweredQActive || false;
     this._dash = null;
     this._shieldCharge = null;
     this._slam = null;
@@ -478,6 +484,7 @@ export default class PredictedSelf {
     this.isAlive = snap.isAlive;
     this.score = snap.score;
     this.classId = snap.classId;
+    this.empoweredQActive = snap.empoweredQActive || false;
     // DASH's direction/distance (_dash) is local-only bookkeeping the
     // synced schema doesn't carry. Landing in DASH straight from a
     // snapshot (the input that triggered it already got confirmed and
