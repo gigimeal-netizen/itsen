@@ -12,6 +12,50 @@ import Player from "../entities/Player.js";
 import Dummy from "../entities/Dummy.js";
 import Sfx from "../audio/Sfx.js";
 
+// Q/W/E display info for the title screen's skill panel (see
+// _renderSkillPanel()) — hand-duplicated copy of NetArenaScene.js's
+// identically-named table (src/CLAUDE.md's no-shared-base-class convention).
+// icon/name/short description per skill, plus the pre-built "Q beats W, W
+// beats E, E beats Q" triangle-hint sentence for that class.
+const CLASS_SKILL_INFO = {
+  swordsman: {
+    q: { icon: "🗡️", name: "발도술", desc: "홀드해서 차지 → 떼면 돌진, 닿으면 즉사" },
+    w: { icon: "🛡️", name: "반격자세", desc: "0.5초간 무적 — 돌진 공격을 받아치면 상대 기절" },
+    e: { icon: "🦵", name: "발차기", desc: "근접 타격 — 넉백, 반격 자세를 뚫으면 기절까지" },
+    triangleHtml:
+      '<span class="c-q">발도술</span>은 <span class="c-w">반격자세</span>에 꺾이고 · ' +
+      '<span class="c-w">반격자세</span>는 <span class="c-e">발차기</span>에 뚫리며 · ' +
+      '<span class="c-e">발차기</span>는 <span class="c-q">발도술</span> 앞에 무너진다',
+  },
+  knight: {
+    q: { icon: "⚔️", name: "연속돌진", desc: "탭 한 번에 고정 거리 돌진 — 명중하면 Q/W/E로 콤보 이어가기" },
+    w: { icon: "🛡️", name: "방패방어", desc: "홀드하는 동안 방어, 이동속도 감소 — 막아내면 다음 Q 강화" },
+    e: { icon: "🔰", name: "방패돌진", desc: "짧은 돌진 타격 — 넉백, 방어 자세를 뚫으면 기절까지" },
+    triangleHtml:
+      '<span class="c-q">연속돌진</span>은 <span class="c-w">방패방어</span>에 꺾이고 · ' +
+      '<span class="c-w">방패방어</span>는 <span class="c-e">방패돌진</span>에 뚫리며 · ' +
+      '<span class="c-e">방패돌진</span>은 <span class="c-q">연속돌진</span> 앞에 무너진다',
+  },
+  warrior: {
+    q: { icon: "🪓", name: "도끼일격", desc: "제자리에서 360도 베기, 닿으면 즉사" },
+    w: { icon: "📢", name: "전투함성", desc: "0.5초간 무적, 직후 주변 적의 스킬을 봉인" },
+    e: { icon: "💥", name: "도약강타", desc: "홀드해서 차지 → 떼면 도약, 착지 충격 — 방어 자세를 뚫으면 기절" },
+    triangleHtml:
+      '<span class="c-q">도끼일격</span>은 <span class="c-w">전투함성</span>에 꺾이고 · ' +
+      '<span class="c-w">전투함성</span>은 <span class="c-e">도약강타</span>에 뚫리며 · ' +
+      '<span class="c-e">도약강타</span>는 <span class="c-q">도끼일격</span> 앞에 무너진다',
+  },
+  mage: {
+    q: { icon: "⚡", name: "마력광선", desc: "홀드해서 차지 → 떼면 광선 발사, 닿으면 즉사" },
+    w: { icon: "💧", name: "유체화", desc: "0.5초간 무적, 직후 1초간 이동속도 증가" },
+    e: { icon: "❄️", name: "눈보라", desc: "부채꼴 범위 공격 — 둔화, 방어/무적 상대는 빙결" },
+    triangleHtml:
+      '<span class="c-q">마력광선</span>은 <span class="c-w">유체화</span>에 꺾이고 · ' +
+      '<span class="c-w">유체화</span>는 <span class="c-e">눈보라</span>에 뚫리며 · ' +
+      '<span class="c-e">눈보라</span>는 <span class="c-q">마력광선</span> 앞에 무너진다',
+  },
+};
+
 export default class ArenaScene extends Phaser.Scene {
   constructor() {
     super("ArenaScene");
@@ -130,6 +174,9 @@ export default class ArenaScene extends Phaser.Scene {
     this.classKnightBtn.classList.toggle("active", this.selectedClassId === "knight");
     this.classWarriorBtn.classList.toggle("active", this.selectedClassId === "warrior");
     this.classMageBtn.classList.toggle("active", this.selectedClassId === "mage");
+    this.skillRowsEl = document.getElementById("skillRows");
+    this.triangleHintEl = document.getElementById("triangleHint");
+    this._renderSkillPanel();
 
     const titleScreen = document.getElementById("titleScreen");
     document.getElementById("startBtn").onclick = () => {
@@ -151,6 +198,7 @@ export default class ArenaScene extends Phaser.Scene {
     this.classKnightBtn.classList.toggle("active", classId === "knight");
     this.classWarriorBtn.classList.toggle("active", classId === "warrior");
     this.classMageBtn.classList.toggle("active", classId === "mage");
+    this._renderSkillPanel();
 
     const wasLocked = this.player.locked;
     this.player.destroyEntity();
@@ -160,6 +208,25 @@ export default class ArenaScene extends Phaser.Scene {
     this.cameras.main.startFollow(this.player, true, 0.12, 0.12);
     this.physics.add.collider(this.player, this.walls, (obj) => obj.handleWallStop());
     this.physics.add.collider(this.player, this.dummy, null, (a, b) => this._shouldBodyBlock(a, b));
+  }
+
+  // Rewrites the title screen's Q/W/E skill panel + triangle-hint sentence
+  // for the currently-selected class (see CLASS_SKILL_INFO) — called once
+  // on init and again every time a different class button is clicked, so
+  // the panel never shows a class other than the one actually selected
+  // (previously hardcoded to swordsman's skills regardless of pick).
+  _renderSkillPanel() {
+    const info = CLASS_SKILL_INFO[this.selectedClassId] || CLASS_SKILL_INFO[DEFAULT_CLASS_ID];
+    const row = (key, cssVar) => `
+      <div class="skill-row" style="--c:${cssVar}">
+        <span class="skill-key">${key.toUpperCase()}</span><span class="skill-icon">${info[key].icon}</span>
+        <div class="skill-text">
+          <b>${info[key].name}</b>
+          <span>${info[key].desc}</span>
+        </div>
+      </div>`;
+    this.skillRowsEl.innerHTML = row("q", "#ff9f43") + row("w", "#7ff0ff") + row("e", "#ffcc33");
+    this.triangleHintEl.innerHTML = info.triangleHtml;
   }
 
   // Switches between ROUND (freeze + banner + reset-both after each death)
@@ -1017,6 +1084,7 @@ export default class ArenaScene extends Phaser.Scene {
           this._spawnImpactBurst(target.x, target.y, 0x7fd0ff, { ringR: 34, bits: 7, dist: 32 });
         } else {
           target._slowedMs = cfg.SLOW_MS;
+          Sfx.blizzardSlow();
           this._spawnImpactBurst(target.x, target.y, 0xdff6ff, { ringR: 24, bits: 5, dist: 22 });
         }
         this.hitstopMs = 45;

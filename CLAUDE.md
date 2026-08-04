@@ -29,10 +29,10 @@ this file as part of the task, not a follow-up:
 ## Project status
 
 Phase 1 (single-player) is feature-complete. Phase 2's multiplayer has grown well past its original MVP
-scope — see below — and Phase 3's "bring Phase 1's polish into the networked client" goal is largely
-done; what's left is raising the room size past 4 players (spec target is 4–6). No bundler/package
-manager is used on the client — Phaser 3 is loaded via CDN and the client is plain ES modules served as
-static files. There is no lint/test setup.
+scope — see below — and Phase 3's "bring Phase 1's polish into the networked client" goal is done, including
+raising the room cap to 10 players (well past the spec's original 4–6 target). What's left is matchmaking
+for team modes (2v2/3v3), not just FFA. No bundler/package manager is used on the client — Phaser 3 is
+loaded via CDN and the client is plain ES modules served as static files. There is no lint/test setup.
 
 ### Running it
 
@@ -44,13 +44,14 @@ static files. There is no lint/test setup.
   npm install   # first time only
   npm start     # node index.js — listens on ws://localhost:2567
   ```
-  Then open `http://localhost:8731/net.html` — it now has its own title screen and lobby screen
-  (create/browse/quick-match a room, `GET /rooms` on the server backs the room list), a nickname +
-  color-swatch picker (persisted in `localStorage`, sent as join options and validated server-side), and
-  full parity with Phase 1's rendering (stick-figure `NetFighter`, synced arena hazards — obstacle walls,
-  octagon ring-out, permanent pits/quicksand — round/deathmatch modes, death VFX). Up to 4 players per
-  room today (`server/constants.js`'s `MAX_PLAYERS`); see "Project status" above re: the 4–6 spec target.
-  Server code lives in `server/` (plain CommonJS, not part of the client's ES module graph) —
+  Then open `http://localhost:8731/net.html` — the title screen itself now has an inline nickname +
+  color-swatch + class picker (persisted in `localStorage`, sent as join options and validated
+  server-side), and "시작하기" joins straight into a match via Colyseus's own `joinOrCreate` matchmaking —
+  there is no separate lobby/room-browsing screen (removed; `GET /rooms` still exists server-side but is
+  currently unused by the client). Full parity with Phase 1's rendering (stick-figure `NetFighter`, synced arena hazards — obstacle walls,
+  octagon ring-out, permanent pits/quicksand — round/deathmatch modes, death VFX). Up to 10 players per
+  room today (`server/constants.js`'s `MAX_PLAYERS`) — see "Project status" above; this exceeds the
+  spec's original 4–6 target. Server code lives in `server/` (plain CommonJS, not part of the client's ES module graph) —
   `server/rooms/ArenaRoom.js` is the authoritative FSM (a server-side port of
   `src/entities/Combatant.js`'s state machine, minus Phaser/Arcade physics), `server/schema/ArenaRoomState.js`
   defines the synced `@colyseus/schema` state, `server/constants.js` is a hand-kept-in-sync copy of the
@@ -71,7 +72,9 @@ independently of the code (e.g. swapping regions).
 
 ## What this project is
 
-A 4–6 player multiplayer top-down real-time action arena game for web/mobile browsers (FFA, 2v2, 3v3, 1v1). One hit from the "Q" skill kills; last player/team standing wins. Full spec: `game_design_spec.md`.
+A multiplayer top-down real-time action arena game for web/mobile browsers (FFA, 2v2, 3v3, 1v1) — the spec's
+original target was 4–6 players; the live room cap is now 10 (see Project status). One hit from the "Q"
+skill kills; last player/team standing wins. Full spec: `game_design_spec.md`.
 
 ## Recommended stack (per spec §7)
 
@@ -107,4 +110,4 @@ Ring-out (fall to death off-arena), periodic pitfalls, slow zones, and obstacles
 
 1. **Phase 1 (done):** Single-player FSM + Q/W/E skill mechanics (Phaser 3), plus bonus content beyond the original roadmap scope — ruins-themed art/arena shell, obstacle cover, quicksand/ring-out hazards, ROUND/DEATHMATCH modes, title screen, hit-stop/impact-burst juice. Entry point: `index.html`.
 2. **Phase 2 (done, grown past MVP):** started as a minimal 2-player sync proof-of-concept, since extended with a lobby/room list, nickname + color customization, and reconnect handling. Entry point: `net.html` + `server/`.
-3. **Phase 3 (in progress):** Phase 1's arena (walls, ring-out, hazards), full visual fidelity (stick-figure rendering, death VFX), and movement-smoothing (client-side interpolation, a raised server patch rate) are already in the networked client. Remaining: raise the 4-player room cap toward the spec's 4–6 range and matchmaking for 2v2/3v3, not just FFA.
+3. **Phase 3 (done):** Phase 1's arena (walls, ring-out, hazards), full visual fidelity (stick-figure rendering, death VFX), movement-smoothing (client-side interpolation, a raised server patch rate), and a 10-player room cap (past the spec's original 4–6 range) are all in the networked client. Remaining: matchmaking for 2v2/3v3, not just FFA.

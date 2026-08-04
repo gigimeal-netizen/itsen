@@ -3,7 +3,7 @@ const C = require("./constants");
 // CommonJS twin of ../src/config/layoutGenerator.js — keep the algorithm
 // identical by hand (server can't import the client's ES module directly).
 // Generates a fresh, point-symmetric arrangement of obstacles, pits, and
-// quicksand once per room, kept clear of all NET_SPAWN_POINTS (4-player FFA)
+// quicksand once per room, kept clear of all NET_SPAWN_POINTS (10-player FFA)
 // so no spawn gets an inherent positional edge.
 function generateSymmetricLayout() {
   const f = {

@@ -432,6 +432,16 @@ class Sfx {
     this._noise({ duration: 0.2, peak: 0.2, filterFreq: 2000, filterType: "highpass", delay: 0.02 });
   }
 
+  // 26c. Mage E: played when the blizzard only slows a target (the plain-hit
+  // branch, not a freeze) — no matching clip supplied, stays synthesized to
+  // keep it clearly gentler/quieter than blizzardFreeze() above (same
+  // "distinguish whiff/plain vs. the stronger counter case" reasoning as
+  // kickHit()/shieldBash()).
+  blizzardSlow() {
+    this._tone({ freqStart: 1100, freqEnd: 500, duration: 0.2, type: "sine", peak: 0.18 });
+    this._noise({ duration: 0.15, peak: 0.12, filterFreq: 2400, filterType: "highpass", delay: 0.02 });
+  }
+
   // 10. Quicksand appearing: a wet shifting-ground rumble as the patch forms.
   terrainAppear() {
     if (this._playClip("terrainAppear", { volume: 0.6 })) return;

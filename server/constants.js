@@ -15,6 +15,10 @@ const STUN_DURATION_MS = 2000;
 const CLASSES = {
   swordsman: {
     id: "swordsman",
+    // skillTypes tells ArenaRoom.js which *shape* of skill logic to run for
+    // Q/W/E, so it can branch on skill shape instead of classId strings —
+    // see the "knight" entry below for the first class with different shapes.
+    skillTypes: { q: "chargeDash", w: "tapParry", e: "kickCone" },
     qDash: {
       MAX_CHARGE_MS: 1200,
       MIN_DISTANCE: 140,
@@ -32,6 +36,138 @@ const CLASSES = {
       KNOCKBACK_SPEED: 900,
       ACTIVE_MS: 120,
       TOTAL_MS: 260,
+    },
+  },
+  // 기사/Knight — mirrors src/config/constants.js's CLASSES.knight exactly.
+  // Q is a tap (not hold) fixed-distance dash, knockback not instakill,
+  // opening a brief COMBO_WINDOW for a Q/W/E follow-up on landing (whiff or
+  // hit alike, unless it killed via an empowered strike). W is HELD (not
+  // tapped), still mobile at -65% speed, and a successful block grants an
+  // empoweredQBuff that redirects the next Q tap into a stationary
+  // instakill line-AOE (EMPOWERED_STRIKE) instead of a dash. E is a short
+  // shield charge that beats a raised guard for bonus knockback+stun.
+  knight: {
+    id: "knight",
+    skillTypes: { q: "comboDash", w: "heldGuard", e: "shieldCharge" },
+    qDash: {
+      DISTANCE: 200,
+      SPEED: 1300,
+      LETHAL: false,
+      PIERCE: false,
+      KNOCKBACK_DISTANCE: 110,
+      KNOCKBACK_SPEED: 950,
+    },
+    empoweredStrike: {
+      LENGTH: 340,
+      WIDTH: 110,
+      ACTIVE_MS: 90,
+      TOTAL_MS: 300,
+    },
+    wParry: {
+      MAX_HOLD_MS: 4000,
+      MOVE_SPEED_MULTIPLIER: 0.35,
+    },
+    eShieldCharge: {
+      DISTANCE: 220,
+      SPEED: 1100,
+      KNOCKBACK_DISTANCE: 130,
+      KNOCKBACK_SPEED: 1000,
+      VS_GUARD_KNOCKBACK_DISTANCE: 220,
+      VS_GUARD_KNOCKBACK_SPEED: 1400,
+      VS_GUARD_STUN_MS: STUN_DURATION_MS,
+    },
+    comboWindow: {
+      WINDOW_MS: 550,
+    },
+    comboAttack: {
+      RANGE: 80,
+      HALF_ANGLE_DEG: 55,
+      ACTIVE_MS: 110,
+      TOTAL_MS: 240,
+      KNOCKBACK_DISTANCE: 130,
+      KNOCKBACK_SPEED: 1000,
+    },
+    empoweredQBuff: {
+      DURATION_MS: 6000,
+    },
+  },
+  // 전사/Warrior — mirrors src/config/constants.js's CLASSES.warrior exactly.
+  // Q is an instant 360-degree hit around self (no travel/charge, instakill).
+  // W is a 0.5s self-invincibility window (see isInvincible) followed by a
+  // delayed one-shot AOE "shout" that disables Q/W/E on anyone it hits for a
+  // second. E is a hold-to-charge diving slam — longer charge means a
+  // further leap and a bigger landing-impact radius — that beats a raised
+  // guard AND an active invincibility outright (stuns instead of countering
+  // the attacker, unlike every other class's W-interaction so far).
+  warrior: {
+    id: "warrior",
+    skillTypes: { q: "axeSwing", w: "battleCry", e: "divingSlam" },
+    axeSwing: {
+      RADIUS: 45,
+      ACTIVE_MS: 90,
+      TOTAL_MS: 260,
+    },
+    battleCry: {
+      DURATION_MS: 500, // self-invincibility window — first phase
+      DISABLE_DELAY_MS: 1000, // gap AFTER invincibility ends before the shout fires
+      SHOUT_RADIUS: 40,
+      DISABLE_MS: 1000, // how long an affected target can't use Q/W/E
+      ACTIVE_MS: 60, // shout burst window — sits at the END of TOTAL_MS, not the start
+      TOTAL_MS: 1500, // DURATION_MS + DISABLE_DELAY_MS
+    },
+    divingSlam: {
+      MAX_CHARGE_MS: 1100,
+      MIN_LEAP_DISTANCE: 0,
+      MAX_LEAP_DISTANCE: 380,
+      MIN_IMPACT_RADIUS: 35,
+      MAX_IMPACT_RADIUS: 75,
+      LEAP_SPEED: 1400,
+      KNOCKBACK_DISTANCE: 140,
+      KNOCKBACK_SPEED: 1100,
+      VS_GUARD_STUN_MS: STUN_DURATION_MS,
+      ACTIVE_MS: 90,
+      TOTAL_MS: 280,
+    },
+  },
+  // 법사/Mage — mirrors src/config/constants.js's CLASSES.mage exactly. Q is
+  // a hold-to-charge laser that does nothing on an early release (must reach
+  // MIN_CHARGE_MS to fire at all, then keeps scaling up to MAX_CHARGE_MS). W
+  // is 0.5s unconditional invincibility (same isInvincible guard as
+  // Warrior's battle cry) immediately followed by a 1s move-speed haste
+  // window. E is an instant wide 180-degree cone: a plain hit slows the
+  // target, but hitting a raised guard or an invincible target freezes them
+  // instead, beating W outright like every other E. A successful W block or
+  // E freeze grants fastCharge, dropping Q's charge threshold way down.
+  mage: {
+    id: "mage",
+    skillTypes: { q: "laserBeam", w: "fluidState", e: "blizzard" },
+    laserBeam: {
+      MIN_CHARGE_MS: 1400,
+      MAX_CHARGE_MS: 2400,
+      MIN_LENGTH: 260,
+      MAX_LENGTH: 620,
+      MIN_WIDTH: 18,
+      MAX_WIDTH: 46,
+      ACTIVE_MS: 140,
+      TOTAL_MS: 220,
+    },
+    fluidState: {
+      DURATION_MS: 500,
+      HASTE_MS: 1000,
+      HASTE_MULTIPLIER: 1.6,
+      TOTAL_MS: 1500,
+    },
+    blizzard: {
+      RANGE: 120, // doubled from the original tuned-down 60 (was 25% of 240)
+      HALF_ANGLE_DEG: 90,
+      SLOW_MS: 1000,
+      VS_GUARD_STUN_MS: STUN_DURATION_MS,
+      ACTIVE_MS: 110,
+      TOTAL_MS: 260,
+    },
+    fastCharge: {
+      DURATION_MS: 6000,
+      CHARGE_MS: 100,
     },
   },
 };
@@ -73,6 +209,22 @@ module.exports = {
     STUNNED: "STUNNED",
     GCD: "GCD",
     DEAD: "DEAD",
+    // Knight additions — mirrors src/config/constants.js's STATES.
+    SHIELD_CHARGE: "SHIELD_CHARGE",
+    COMBO_WINDOW: "COMBO_WINDOW",
+    COMBO_ATTACK: "COMBO_ATTACK",
+    EMPOWERED_STRIKE: "EMPOWERED_STRIKE",
+    // Warrior additions.
+    AXE_SWING: "AXE_SWING",
+    BATTLE_CRY: "BATTLE_CRY",
+    SLAM_CHARGE: "SLAM_CHARGE",
+    SLAMMING: "SLAMMING",
+    SLAM_IMPACT: "SLAM_IMPACT",
+    // Mage additions.
+    LASER_CHARGE: "LASER_CHARGE",
+    LASER_FIRE: "LASER_FIRE",
+    FLUID: "FLUID",
+    BLIZZARD: "BLIZZARD",
   },
 
   // Arena hazards — mirrors the client's constants.js. Wall stop + wall-stun
@@ -92,7 +244,11 @@ module.exports = {
     OBSTACLE_MIN_H: 90,
     OBSTACLE_MAX_H: 170,
     MIN_SPACING: 160,
-    SPAWN_CLEARANCE: 260,
+    // Sized against adjacent-spawn spacing (~283px on the 10-point ring,
+    // down from the old 4-point diamond's ~750px) — left at the old 260,
+    // adjacent spawns' clearance circles would overlap heavily and starve
+    // the hazard placer (tryPlacePair() soft-fails on exhausted attempts).
+    SPAWN_CLEARANCE: 150,
     CORNER_CLEARANCE: 40,
     PLACEMENT_ATTEMPTS: 40,
   },
@@ -107,6 +263,7 @@ module.exports = {
     H: 105,
   },
   SLOW_ZONE_FACTOR: 0.3,
+  SLOW_DEBUFF_FACTOR: 0.5, // Mage's blizzard (E): -50% movement speed while slowed
 
   SIMULATION_INTERVAL_MS: 16, // ~60Hz authoritative tick
 
@@ -123,18 +280,24 @@ module.exports = {
   DEATHMATCH_WIN_SCORE: 20,
   MATCH_END_BANNER_MS: 4000,
 
-  // 4-player FFA (no lobby/ready-check UI): once 2+ players are in, a join
+  // 10-player FFA (no lobby/ready-check UI): once 2+ players are in, a join
   // grace window opens — every new joiner (up to MAX_PLAYERS) resets it —
   // so people trickling in over a few seconds still get folded into the
-  // same match instead of each needing to be the 4th to ever start a game.
-  MAX_PLAYERS: 4,
+  // same match instead of each needing to be the 10th to ever start a game.
+  MAX_PLAYERS: 10,
   JOIN_GRACE_MS: 5000,
 
-  // The room's real socket cap, well above MAX_PLAYERS — once the 4 active
+  // Solo auto-fill: if a room stays at exactly 1 real player for this long
+  // with nobody else joining, ArenaRoom.spawnBot() adds one AI opponent so
+  // the match starts anyway (see ArenaRoom.js's botSpawnMs/spawnBot()) —
+  // server-only, no client-side equivalent needed.
+  BOT_SPAWN_DELAY_MS: 8000,
+
+  // The room's real socket cap, well above MAX_PLAYERS — once the 10 active
   // seats are full (or a client explicitly asks to spectate), further
   // joiners are read-only spectators (no PlayerState, no input applied)
   // instead of Colyseus spinning up a second room. See ArenaRoom.onJoin().
-  MAX_CLIENTS: 16,
+  MAX_CLIENTS: 24,
 
   // Grace window for an unexpected disconnect (dropped wifi, mobile screen
   // lock, etc.) to reconnect and reclaim the same seat/schema entry before
@@ -142,13 +305,20 @@ module.exports = {
   RECONNECT_GRACE_SEC: 20,
 
   // FFA spawn points as arena-fraction coordinates — mirrors the client's
-  // NET_SPAWN_POINTS exactly (a diamond arrangement where each opposite
-  // pair is already 180°-symmetric about the arena center, matching the
-  // point-symmetric hazard layout in layoutGenerator.js).
+  // NET_SPAWN_POINTS exactly. A 10-point ring around the arena center, each
+  // point's antipodal partner (i and i+5) exactly 180°-symmetric about the
+  // center, so the point-symmetric hazard layout (layoutGenerator.js) stays
+  // fair for every seat without needing a different placement algorithm.
   NET_SPAWN_POINTS: [
-    { x: 0.25, y: 0.5 },
-    { x: 0.75, y: 0.5 },
-    { x: 0.5, y: 0.2 },
-    { x: 0.5, y: 0.8 },
+    { x: 0.800, y: 0.500 },
+    { x: 0.743, y: 0.665 },
+    { x: 0.593, y: 0.766 },
+    { x: 0.407, y: 0.766 },
+    { x: 0.257, y: 0.665 },
+    { x: 0.200, y: 0.500 },
+    { x: 0.257, y: 0.335 },
+    { x: 0.407, y: 0.234 },
+    { x: 0.593, y: 0.234 },
+    { x: 0.743, y: 0.335 },
   ],
 };

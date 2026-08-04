@@ -26,6 +26,8 @@ import {
   PLAYER,
   STATES,
   NET_COUNTDOWN_MS,
+  NET_MAX_PLAYERS,
+  DEFAULT_CLASS_ID,
   classSkills,
 } from "../config/constants.js";
 import NetFighter from "../net/NetFighter.js";
@@ -36,7 +38,79 @@ import TouchControls from "../input/TouchControls.js";
 // Color swatch palette — the player picks one in the lobby, synced as
 // PlayerState.colorIndex (validated server-side, see ArenaRoom's
 // sanitizeColorIndex/COLOR_COUNT). Not tied to join order anymore.
-const PLAYER_COLORS = [0x4fd1ff, 0xff8a5c, 0x8aff6b, 0xd88aff, 0xff5c5c, 0xffe066];
+const PLAYER_COLORS = [
+  0x4fd1ff, 0xff8a5c, 0x8aff6b, 0xd88aff, 0xff5c5c, 0xffe066, 0xc2ff5c, 0x5cffab, 0x5c7bff, 0xff5cc2,
+];
+
+// Per-state pixel radius used by _findNearbyAttackerAngle() to decide
+// whether a nearby player still in one of these states was likely this
+// kill's attacker (see that method's comment) — sized against each skill's
+// own server-side hit range (server/constants.js) plus margin, since a flat
+// radius tuned for DASH badly under-covers a long-reach skill like laserBeam.
+const KILL_ATTRIBUTION_RADIUS = {
+  [STATES.DASH]: 90,
+  [STATES.COMBO_ATTACK]: 110, // comboAttack.RANGE(80) + PLAYER_RADIUS(18) + margin
+  [STATES.AXE_SWING]: 80, // axeSwing.RADIUS(45) + PLAYER_RADIUS(18) + margin
+  [STATES.EMPOWERED_STRIKE]: 360, // empoweredStrike.LENGTH(340) + margin
+  [STATES.LASER_FIRE]: 650, // laserBeam.MAX_LENGTH(620) + margin
+};
+
+// Class picker options — labels kept hand-in-sync with index.html's
+// #classSwitch buttons (see src/CLAUDE.md's "no shared base class" note,
+// same hand-sync rule as NetFighter's pose code). All 4 classes now have a
+// server-side FSM ported (server/rooms/ArenaRoom.js's CLASSES table).
+const CLASS_OPTIONS = [
+  { id: "swordsman", label: "검사" },
+  { id: "knight", label: "기사" },
+  { id: "warrior", label: "전사" },
+  { id: "mage", label: "법사" },
+];
+
+// Q/W/E display info for the title screen's skill panel (see
+// _renderSkillPanel()) — icon/name/short description per skill, plus the
+// pre-built "Q beats W, W beats E, E beats Q" triangle-hint sentence for
+// that class (same rock-paper-scissors shape for every class, just
+// different skill names filling each slot — Korean particles hand-checked
+// per name rather than templated, same spirit as the rest of this file's
+// Korean text). c-q/c-w/c-e span classes match net.html's CSS coloring.
+const CLASS_SKILL_INFO = {
+  swordsman: {
+    q: { icon: "🗡️", name: "발도술", desc: "홀드해서 차지 → 떼면 돌진, 닿으면 즉사" },
+    w: { icon: "🛡️", name: "반격자세", desc: "0.5초간 무적 — 돌진 공격을 받아치면 상대 기절" },
+    e: { icon: "🦵", name: "발차기", desc: "근접 타격 — 넉백, 반격 자세를 뚫으면 기절까지" },
+    triangleHtml:
+      '<span class="c-q">발도술</span>은 <span class="c-w">반격자세</span>에 꺾이고 · ' +
+      '<span class="c-w">반격자세</span>는 <span class="c-e">발차기</span>에 뚫리며 · ' +
+      '<span class="c-e">발차기</span>는 <span class="c-q">발도술</span> 앞에 무너진다',
+  },
+  knight: {
+    q: { icon: "⚔️", name: "연속돌진", desc: "탭 한 번에 고정 거리 돌진 — 명중하면 Q/W/E로 콤보 이어가기" },
+    w: { icon: "🛡️", name: "방패방어", desc: "홀드하는 동안 방어, 이동속도 감소 — 막아내면 다음 Q 강화" },
+    e: { icon: "🔰", name: "방패돌진", desc: "짧은 돌진 타격 — 넉백, 방어 자세를 뚫으면 기절까지" },
+    triangleHtml:
+      '<span class="c-q">연속돌진</span>은 <span class="c-w">방패방어</span>에 꺾이고 · ' +
+      '<span class="c-w">방패방어</span>는 <span class="c-e">방패돌진</span>에 뚫리며 · ' +
+      '<span class="c-e">방패돌진</span>은 <span class="c-q">연속돌진</span> 앞에 무너진다',
+  },
+  warrior: {
+    q: { icon: "🪓", name: "도끼일격", desc: "제자리에서 360도 베기, 닿으면 즉사" },
+    w: { icon: "📢", name: "전투함성", desc: "0.5초간 무적, 직후 주변 적의 스킬을 봉인" },
+    e: { icon: "💥", name: "도약강타", desc: "홀드해서 차지 → 떼면 도약, 착지 충격 — 방어 자세를 뚫으면 기절" },
+    triangleHtml:
+      '<span class="c-q">도끼일격</span>은 <span class="c-w">전투함성</span>에 꺾이고 · ' +
+      '<span class="c-w">전투함성</span>은 <span class="c-e">도약강타</span>에 뚫리며 · ' +
+      '<span class="c-e">도약강타</span>는 <span class="c-q">도끼일격</span> 앞에 무너진다',
+  },
+  mage: {
+    q: { icon: "⚡", name: "마력광선", desc: "홀드해서 차지 → 떼면 광선 발사, 닿으면 즉사" },
+    w: { icon: "💧", name: "유체화", desc: "0.5초간 무적, 직후 1초간 이동속도 증가" },
+    e: { icon: "❄️", name: "눈보라", desc: "부채꼴 범위 공격 — 둔화, 방어/무적 상대는 빙결" },
+    triangleHtml:
+      '<span class="c-q">마력광선</span>은 <span class="c-w">유체화</span>에 꺾이고 · ' +
+      '<span class="c-w">유체화</span>는 <span class="c-e">눈보라</span>에 뚫리며 · ' +
+      '<span class="c-e">눈보라</span>는 <span class="c-q">마력광선</span> 앞에 무너진다',
+  },
+};
 
 // Renders players slightly in the past, interpolating between two buffered
 // server snapshots instead of chasing whatever the latest one happens to be
@@ -67,6 +141,31 @@ export default class NetArenaScene extends Phaser.Scene {
     this.load.audio("parry", "assets/audio/parry.mp3");
     this.load.audio("wSuccess", "assets/audio/Wsucces.mp3");
 
+    // Knight (기사) — see Sfx.js's comboDashRelease/shieldRaise/shieldChargeRelease/
+    // comboSwing/comboHit/empoweredQRelease.
+    this.load.audio("knightQ1", "assets/audio/knight_Q1.mp3");
+    this.load.audio("knightQ2", "assets/audio/knight_Q2.mp3");
+    this.load.audio("knightQSwoosh", "assets/audio/knight_Q_swoosh.mp3");
+    this.load.audio("knightPowerdQ", "assets/audio/knight_powerdQ.mp3");
+    this.load.audio("knightE", "assets/audio/knight_E.mp3");
+    this.load.audio("knightW", "assets/audio/knight_W.mp3");
+
+    // Warrior (전사) — see Sfx.js's axeSwing/battleCryShout/battleCryDebuffHit/
+    // slamLeap/slamImpact.
+    this.load.audio("vikingQ", "assets/audio/viking_Q.mp3");
+    this.load.audio("vikingW1", "assets/audio/viking_W1.mp3");
+    this.load.audio("vikingW2", "assets/audio/viking_W2.mp3");
+    this.load.audio("vikingE1", "assets/audio/viking_E1.mp3");
+    this.load.audio("vikingEImpact", "assets/audio/viking_E_impact.mp3");
+
+    // Mage (법사) — see Sfx.js's laserFire/fluidStateStart/blizzardCast/
+    // blizzardFreeze (charge loop reuses magiQCharging via chargeLoopStart).
+    this.load.audio("magiQ", "assets/audio/magi_Q.mp3");
+    this.load.audio("magiQCharging", "assets/audio/magi_Q_charging.mp3");
+    this.load.audio("magiW", "assets/audio/magi_W.mp3");
+    this.load.audio("magiE", "assets/audio/magi_E.mp3");
+    this.load.audio("magiEFrozen", "assets/audio/magi_E_frozen.mp3");
+
     this.load.image("arenaVoid", "assets/images/arena_void.png");
     this.load.image("arenaTile", "assets/images/arena_tile.png");
     this.load.image("arenaObs", "assets/images/arena_obs.png");
@@ -88,6 +187,7 @@ export default class NetArenaScene extends Phaser.Scene {
     this.mySessionId = null;
     this.isSpectator = false;
     this.pointerDown = false;
+    this.qPressedFlag = false; // tap edge — Knight's comboDash Q reads this instead of qHeld
     this.wPressedFlag = false;
     this.ePressedFlag = false;
     this.connectionError = null;
@@ -106,8 +206,11 @@ export default class NetArenaScene extends Phaser.Scene {
     // and a brief hit-stop freeze — all detected client-side by diffing each
     // player's snapshot frame to frame (isAlive/state transitions), since
     // the server only syncs the flat state, not "cause of death" events.
-    this._prevSnap = new Map(); // sessionId -> { isAlive, state, stunTimer, score }
+    this._prevSnap = new Map(); // sessionId -> { isAlive, state, stunTimer, score, skillsDisabled, slowed }
     this._kickHitFlags = new Map(); // sessionId -> already played kickHit() for this kick
+    this._comboHitFlags = new Map(); // sessionId -> already played comboHit() for this combo attack
+    this._shieldChargeHitFlags = new Map(); // sessionId -> already played shieldBash() for this charge
+    this._blizzardFreezeFlags = new Map(); // sessionId -> already played blizzardFreeze() for this cast
     this.hitstopMs = 0;
 
     // Match-flow UI (3-2-1-FIGHT! countdown, round banner, scoreboard) —
@@ -127,16 +230,12 @@ export default class NetArenaScene extends Phaser.Scene {
     this.input.keyboard.once("keydown", unlockAudio);
 
     this.titleScreenEl = document.getElementById("titleScreen");
-    this.lobbyScreenEl = document.getElementById("lobbyScreen");
-    this.lobbyRoomListEl = document.getElementById("lobbyRoomList");
-    this.lobbyErrorEl = document.getElementById("lobbyError");
-    this.lobbyNameInputEl = document.getElementById("lobbyNameInput");
-    this._lobbyRefreshTimer = null;
+    this.titleErrorEl = document.getElementById("titleError");
 
     // Player profile (nickname + color swatch), persisted across visits so
     // returning players don't have to re-pick every time. Sent as join
-    // options (see _quickMatch/_createRoom/_joinRoom) — the server validates
-    // and stores both on PlayerState (ArenaRoom.onJoin()).
+    // options (see _startGame) — the server validates and stores both on
+    // PlayerState (ArenaRoom.onJoin()).
     this.lobbyNickInputEl = document.getElementById("lobbyNickInput");
     this.lobbyColorRowEl = document.getElementById("lobbyColorRow");
     this.myNickname = localStorage.getItem("itsen_nickname") || "";
@@ -151,18 +250,21 @@ export default class NetArenaScene extends Phaser.Scene {
     };
     this._renderColorSwatches();
 
+    // Class choice, same persistence/validation shape as colorIndex above.
+    this.lobbyClassRowEl = document.getElementById("lobbyClassRow");
+    this.myClassId = localStorage.getItem("itsen_classId") || DEFAULT_CLASS_ID;
+    if (!CLASS_OPTIONS.some((c) => c.id === this.myClassId)) {
+      this.myClassId = DEFAULT_CLASS_ID;
+    }
+    this._renderClassButtons();
+    this.skillRowsEl = document.getElementById("skillRows");
+    this.triangleHintEl = document.getElementById("triangleHint");
+    this._renderSkillPanel();
+
     document.getElementById("startBtn").onclick = () => {
       unlockAudio();
-      this.titleScreenEl.classList.add("hidden");
-      this._openLobby();
+      this._startGame();
     };
-    document.getElementById("lobbyBackBtn").onclick = () => {
-      this._closeLobby();
-      this.titleScreenEl.classList.remove("hidden");
-    };
-    document.getElementById("lobbyRefreshBtn").onclick = () => this._refreshRoomList();
-    document.getElementById("lobbyQuickBtn").onclick = () => this._quickMatch();
-    document.getElementById("lobbyCreateBtn").onclick = () => this._createRoom();
     document.getElementById("leaveBtn").onclick = () => this._leaveMatch();
 
     this.input.on("pointerdown", (p) => {
@@ -172,6 +274,8 @@ export default class NetArenaScene extends Phaser.Scene {
       if (!p.leftButtonDown()) this.pointerDown = false;
     });
     this.qKey = this.input.keyboard.addKey("Q");
+    this.wKey = this.input.keyboard.addKey("W"); // continuous read — Knight's heldGuard W
+    this.eKey = this.input.keyboard.addKey("E"); // continuous read — Warrior's divingSlam hold-to-charge E
     // event.repeat guards against OS keyboard auto-repeat — holding W/E
     // even slightly past a quick tap fires native keydown repeatedly
     // (every ~30-50ms after an initial ~500ms delay), and without this
@@ -179,6 +283,10 @@ export default class NetArenaScene extends Phaser.Scene {
     // plus its GCD happens to land in a similar few-hundred-ms range, a
     // held key kept re-triggering the whole skill 2-3 times per press —
     // read as the sound/animation firing multiple times per single press.
+    this.input.keyboard.on("keydown-Q", (event) => {
+      if (event.repeat) return;
+      this.qPressedFlag = true;
+    });
     this.input.keyboard.on("keydown-W", (event) => {
       if (event.repeat) return;
       this.wPressedFlag = true;
@@ -611,7 +719,14 @@ export default class NetArenaScene extends Phaser.Scene {
   _detectFighterEvents(sessionId, snap) {
     const fighter = this.fighters.get(sessionId);
     const prev = this._prevSnap.get(sessionId);
-    this._prevSnap.set(sessionId, { isAlive: snap.isAlive, state: snap.state, stunTimer: snap.stunTimer, score: snap.score });
+    this._prevSnap.set(sessionId, {
+      isAlive: snap.isAlive,
+      state: snap.state,
+      stunTimer: snap.stunTimer,
+      score: snap.score,
+      skillsDisabled: snap.skillsDisabled,
+      slowed: snap.slowed,
+    });
     if (!prev || !fighter) return;
 
     // Q charging pitch-rising loop: only for the LOCAL player's own charge —
@@ -620,11 +735,23 @@ export default class NetArenaScene extends Phaser.Scene {
     // remote charge would just fight over that one shared audio resource.
     // (The one-shot 100%-ready ding + sparkles, in NetFighter.sync(), still
     // fire for everyone — that's useful "someone's about to dash" info.)
+    // Covers Q's hold-to-charge (CHARGING), Warrior's hold-to-charge E
+    // (SLAM_CHARGE), and Mage's hold-to-charge Q (LASER_CHARGE) — same loop,
+    // different clip/denominator per state.
+    const CHARGE_STATES = [STATES.CHARGING, STATES.SLAM_CHARGE, STATES.LASER_CHARGE];
     if (sessionId === this.mySessionId) {
-      if (snap.state === STATES.CHARGING) {
-        if (prev.state !== STATES.CHARGING) Sfx.chargeLoopStart();
-        Sfx.chargeLoopUpdate(snap.chargeTime / classSkills(snap.classId).qDash.MAX_CHARGE_MS);
-      } else if (prev.state === STATES.CHARGING) {
+      if (CHARGE_STATES.includes(snap.state)) {
+        if (!CHARGE_STATES.includes(prev.state)) {
+          Sfx.chargeLoopStart(snap.state === STATES.LASER_CHARGE ? "magiQCharging" : "qCharging");
+        }
+        const maxMs =
+          snap.state === STATES.SLAM_CHARGE
+            ? classSkills(snap.classId).divingSlam.MAX_CHARGE_MS
+            : snap.state === STATES.LASER_CHARGE
+              ? classSkills(snap.classId).laserBeam.MAX_CHARGE_MS
+              : classSkills(snap.classId).qDash.MAX_CHARGE_MS;
+        Sfx.chargeLoopUpdate(snap.chargeTime / maxMs);
+      } else if (CHARGE_STATES.includes(prev.state)) {
         Sfx.chargeLoopStop();
       }
     }
@@ -640,7 +767,7 @@ export default class NetArenaScene extends Phaser.Scene {
 
     if (prev.isAlive && !snap.isAlive) {
       Sfx.death();
-      const killerAngle = this._findNearbyDasherAngle(sessionId, snap);
+      const killerAngle = this._findNearbyAttackerAngle(sessionId, snap);
       if (killerAngle !== null) {
         this._spawnDeathBurst(snap.x, snap.y, fighter.color, killerAngle);
         this._spawnBloodEffect(snap.x, snap.y, killerAngle);
@@ -655,17 +782,21 @@ export default class NetArenaScene extends Phaser.Scene {
       return;
     }
 
+    const skillTypes = classSkills(snap.classId).skillTypes;
+
     if (prev.state !== STATES.DASH && snap.state === STATES.DASH) {
       if (DEBUG && sessionId === this.mySessionId) {
         console.log(`[sfx] dashRelease() fired — prev.state=${prev.state} -> snap.state=${snap.state} t=${Math.round(performance.now())}`);
       }
-      Sfx.dashRelease();
+      if (skillTypes.q === "comboDash") Sfx.comboDashRelease();
+      else Sfx.dashRelease();
     }
     if (prev.state !== STATES.PARRYING && snap.state === STATES.PARRYING) {
       if (DEBUG && sessionId === this.mySessionId) {
         console.log(`[sfx] parryStance() fired — prev.state=${prev.state} -> snap.state=${snap.state} t=${Math.round(performance.now())}`);
       }
-      Sfx.parryStance();
+      if (skillTypes.w === "heldGuard") Sfx.shieldRaise();
+      else Sfx.parryStance();
     }
     if (prev.state !== STATES.KICKING && snap.state === STATES.KICKING) {
       if (DEBUG && sessionId === this.mySessionId) {
@@ -674,10 +805,49 @@ export default class NetArenaScene extends Phaser.Scene {
       Sfx.kickSwing();
       this._kickHitFlags.set(sessionId, false);
     }
+    if (prev.state !== STATES.SHIELD_CHARGE && snap.state === STATES.SHIELD_CHARGE) {
+      Sfx.shieldChargeRelease();
+      this._shieldChargeHitFlags.set(sessionId, false);
+    }
+    if (prev.state !== STATES.COMBO_ATTACK && snap.state === STATES.COMBO_ATTACK) {
+      Sfx.comboSwing();
+      this._comboHitFlags.set(sessionId, false);
+    }
+    if (prev.state !== STATES.EMPOWERED_STRIKE && snap.state === STATES.EMPOWERED_STRIKE) {
+      Sfx.empoweredQRelease();
+    }
+    if (prev.state !== STATES.AXE_SWING && snap.state === STATES.AXE_SWING) {
+      Sfx.axeSwing();
+    }
+    if (prev.state !== STATES.BATTLE_CRY && snap.state === STATES.BATTLE_CRY) {
+      Sfx.battleCryShout();
+    }
+    if (prev.state !== STATES.SLAMMING && snap.state === STATES.SLAMMING) {
+      Sfx.slamLeap();
+    }
+    if (prev.state !== STATES.SLAM_IMPACT && snap.state === STATES.SLAM_IMPACT) {
+      Sfx.slamImpact();
+    }
+    if (prev.state !== STATES.LASER_FIRE && snap.state === STATES.LASER_FIRE) {
+      Sfx.laserFire();
+    }
+    if (prev.state !== STATES.FLUID && snap.state === STATES.FLUID) {
+      Sfx.fluidStateStart();
+    }
+    if (prev.state !== STATES.BLIZZARD && snap.state === STATES.BLIZZARD) {
+      Sfx.blizzardCast();
+      this._blizzardFreezeFlags.set(sessionId, false);
+    }
     // PARRYING only ever resolves to GCD (timed out) or IDLE (successful
     // counter, exempt from GCD) — so PARRYING->IDLE uniquely means success.
     if (prev.state === STATES.PARRYING && snap.state === STATES.IDLE) {
       Sfx.parrySuccess();
+    }
+    // heldGuard's shield-lower plays specifically on a voluntary/hold-ceiling
+    // release into GCD — mirrors _updateParrying's heldGuard branch. Plain
+    // tap-parry has no equivalent sound on this transition.
+    if (prev.state === STATES.PARRYING && snap.state === STATES.GCD && skillTypes.w === "heldGuard") {
+      Sfx.shieldLower();
     }
 
     if (prev.state !== STATES.STUNNED && snap.state === STATES.STUNNED) {
@@ -693,8 +863,28 @@ export default class NetArenaScene extends Phaser.Scene {
       this.hitstopMs = big ? 70 : 40;
     }
 
+    // Warrior's battle-cry shout debuff and Mage's blizzard slow are already
+    // synced ground-truth booleans (skillsDisabled/slowed) — no geometry
+    // replication needed, just fire the landed-hit cue on the false->true
+    // edge, exactly once per target actually affected.
+    if (!prev.skillsDisabled && snap.skillsDisabled) {
+      Sfx.battleCryDebuffHit();
+    }
+    if (!prev.slowed && snap.slowed) {
+      Sfx.blizzardSlow();
+    }
+
     if (snap.state === STATES.KICKING && !this._kickHitFlags.get(sessionId)) {
       this._checkKickHit(sessionId, snap);
+    }
+    if (snap.state === STATES.COMBO_ATTACK && !this._comboHitFlags.get(sessionId)) {
+      this._checkComboAttackHit(sessionId, snap);
+    }
+    if (snap.state === STATES.SHIELD_CHARGE && !this._shieldChargeHitFlags.get(sessionId)) {
+      this._checkShieldChargeHit(sessionId, snap);
+    }
+    if (snap.state === STATES.BLIZZARD && !this._blizzardFreezeFlags.get(sessionId)) {
+      this._checkBlizzardFreezeHit(sessionId, snap);
     }
   }
 
@@ -723,16 +913,92 @@ export default class NetArenaScene extends Phaser.Scene {
     }
   }
 
-  // A dash-kill's victim doesn't know who hit it (the schema has no
-  // attacker id) — approximate it by finding another player still mid-DASH
-  // right next to the death spot (the killer's DASH state persists for a
-  // moment after the hit lands, until stepDash resolves the distance/wall).
-  _findNearbyDasherAngle(sessionId, snap) {
+  // Same replication idea as _checkKickHit, over Knight's comboAttack cone
+  // (ArenaRoom.checkComboAttack). A landed hit is an instakill there — the
+  // isAlive false-edge above already plays Sfx.death(), this just layers
+  // the distinctive knightQ2 cue on top, same as single-player. A target
+  // currently PARRYING is a parry-counter on the server (no kill, the
+  // attacker gets stunned instead), so it must NOT count as a hit here.
+  _checkComboAttackHit(attackerId, attacker) {
+    if (!this._latestSnapshots) return;
+    const combo = classSkills(attacker.classId).comboAttack;
+    const halfAngle = Phaser.Math.DegToRad(combo.HALF_ANGLE_DEG);
+    for (const [otherId, other] of this._latestSnapshots.entries()) {
+      if (otherId === attackerId || !other.isAlive || other.state === STATES.PARRYING) continue;
+      const dist = Math.hypot(attacker.x - other.x, attacker.y - other.y);
+      if (dist > combo.RANGE + PLAYER.RADIUS) continue;
+      const angleToTarget = Math.atan2(other.y - attacker.y, other.x - attacker.x);
+      const diff = Phaser.Math.Angle.Wrap(angleToTarget - attacker.angle);
+      if (Math.abs(diff) > halfAngle) continue;
+
+      this._comboHitFlags.set(attackerId, true);
+      Sfx.comboHit();
+      this._spawnImpactBurst(other.x, other.y, 0xffcc33, { ringR: 26, bits: 5, dist: 24 });
+      return;
+    }
+  }
+
+  // Same replication idea as _checkKickHit, over Knight's eShieldCharge —
+  // a plain radius check, no angle/cone (ArenaRoom.checkShieldCharge). The
+  // vs-guard case is differentiated visually only (per the single-player
+  // design), so shieldBash() fires for either branch.
+  _checkShieldChargeHit(chargerId, charger) {
+    if (!this._latestSnapshots) return;
+    for (const [otherId, other] of this._latestSnapshots.entries()) {
+      if (otherId === chargerId || !other.isAlive) continue;
+      const dist = Math.hypot(charger.x - other.x, charger.y - other.y);
+      if (dist > PLAYER.RADIUS * 2) continue;
+
+      this._shieldChargeHitFlags.set(chargerId, true);
+      Sfx.shieldBash();
+      this._spawnImpactBurst(other.x, other.y, 0xffcc33, { ringR: 26, bits: 5, dist: 24 });
+      return;
+    }
+  }
+
+  // Same replication idea as _checkKickHit, over Mage's blizzard cone
+  // (ArenaRoom.checkBlizzard) — but only for the freeze branch (hitting a
+  // PARRYING or currently-invincible target). The plain-slow branch is
+  // covered by the `slowed` flag-flip above instead, since that's already a
+  // synced ground-truth boolean and needs no geometry here. FLUID/
+  // BATTLE_CRY are checked directly as a client-side approximation of the
+  // server's isInvincible() — good enough for a sound cue, not gameplay-
+  // authoritative, same spirit as every other client-side hit replication.
+  _checkBlizzardFreezeHit(attackerId, attacker) {
+    if (!this._latestSnapshots) return;
+    const cfg = classSkills(attacker.classId).blizzard;
+    const halfAngle = Phaser.Math.DegToRad(cfg.HALF_ANGLE_DEG);
+    for (const [otherId, other] of this._latestSnapshots.entries()) {
+      if (otherId === attackerId || !other.isAlive) continue;
+      const vsGuardOrInvincible = other.state === STATES.PARRYING || other.state === STATES.FLUID || other.state === STATES.BATTLE_CRY;
+      if (!vsGuardOrInvincible) continue;
+      const dist = Math.hypot(attacker.x - other.x, attacker.y - other.y);
+      if (dist > cfg.RANGE + PLAYER.RADIUS) continue;
+      const angleToTarget = Math.atan2(other.y - attacker.y, other.x - attacker.x);
+      const diff = Phaser.Math.Angle.Wrap(angleToTarget - attacker.angle);
+      if (Math.abs(diff) > halfAngle) continue;
+
+      this._blizzardFreezeFlags.set(attackerId, true);
+      Sfx.blizzardFreeze();
+      this._spawnImpactBurst(other.x, other.y, 0x7fd0ff, { ringR: 34, bits: 7, dist: 32 });
+      return;
+    }
+  }
+
+  // A skill-kill's victim doesn't know who hit it (the schema has no
+  // attacker id) — approximate it by finding another player still in one of
+  // the 5 instakill-capable states (their state persists for a moment after
+  // the hit lands, until the server resolves/clears it) within that skill's
+  // own effective range of the death spot. A flat radius doesn't reflect
+  // each skill's actual shape (cone/rectangle vs. circle), but this only
+  // ever picks which death VFX flavor plays — cosmetic-only, same as before.
+  _findNearbyAttackerAngle(sessionId, snap) {
     if (!this._latestSnapshots) return null;
     for (const [otherId, other] of this._latestSnapshots.entries()) {
       if (otherId === sessionId) continue;
-      if (other.state !== STATES.DASH) continue;
-      if (Math.hypot(other.x - snap.x, other.y - snap.y) < 90) return other.angle;
+      const radius = KILL_ATTRIBUTION_RADIUS[other.state];
+      if (radius === undefined) continue;
+      if (Math.hypot(other.x - snap.x, other.y - snap.y) < radius) return other.angle;
     }
     return null;
   }
@@ -759,69 +1025,7 @@ export default class NetArenaScene extends Phaser.Scene {
     return this._client;
   }
 
-  // ---- Lobby (room list / create / join) --------------------------
-
-  _openLobby() {
-    this.lobbyScreenEl.classList.remove("hidden");
-    this._refreshRoomList();
-    // Rooms fill up / new ones appear while someone's just sitting on the
-    // list — poll rather than requiring a manual refresh every time.
-    this._lobbyRefreshTimer = setInterval(() => this._refreshRoomList(), 3000);
-  }
-
-  _closeLobby() {
-    this.lobbyScreenEl.classList.add("hidden");
-    if (this._lobbyRefreshTimer) {
-      clearInterval(this._lobbyRefreshTimer);
-      this._lobbyRefreshTimer = null;
-    }
-  }
-
-  async _refreshRoomList() {
-    this._ensureClient();
-    try {
-      const res = await fetch(`${this._serverHttpUrl}/rooms`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const rooms = await res.json();
-      this.lobbyErrorEl.textContent = "";
-      this._renderRoomList(rooms);
-    } catch (err) {
-      this.lobbyErrorEl.textContent = `방 목록을 불러오지 못했습니다: ${err.message || err}`;
-    }
-  }
-
-  _renderRoomList(rooms) {
-    if (!rooms.length) {
-      this.lobbyRoomListEl.innerHTML = '<div class="empty">열린 방이 없습니다. 새로 만들어보세요!</div>';
-      return;
-    }
-    this.lobbyRoomListEl.innerHTML = "";
-    for (const room of rooms) {
-      const meta = room.metadata || {};
-      const name = meta.name || "이름없는 방";
-      const mode = meta.mode === "round" ? "ROUND" : "DEATHMATCH";
-      const playerCount = meta.playerCount ?? 0;
-      const maxPlayers = meta.maxPlayers ?? 4;
-      const spectatorCount = meta.spectatorCount ?? 0;
-      const full = playerCount >= maxPlayers;
-
-      const row = document.createElement("div");
-      row.className = "lobby-room-row";
-      row.innerHTML =
-        `<div class="info">` +
-        `<span class="name">${this._escapeHtml(name)}</span>` +
-        `<span class="meta">${mode} · 플레이어 ${playerCount}/${maxPlayers}` +
-        `${spectatorCount > 0 ? ` · 관전 ${spectatorCount}` : ""}</span>` +
-        `</div>` +
-        `<div class="actions">` +
-        `<button class="joinBtn primary" ${full ? "disabled" : ""}>${full ? "가득 참" : "입장"}</button>` +
-        `<button class="spectateBtn">관전</button>` +
-        `</div>`;
-      row.querySelector(".joinBtn").onclick = () => this._joinRoom(room.roomId, false);
-      row.querySelector(".spectateBtn").onclick = () => this._joinRoom(room.roomId, true);
-      this.lobbyRoomListEl.appendChild(row);
-    }
-  }
+  // ---- Profile picker (nickname / color / class) + join --------------
 
   _renderColorSwatches() {
     this.lobbyColorRowEl.innerHTML = "";
@@ -838,50 +1042,66 @@ export default class NetArenaScene extends Phaser.Scene {
     });
   }
 
+  _renderClassButtons() {
+    this.lobbyClassRowEl.innerHTML = "";
+    CLASS_OPTIONS.forEach(({ id, label }) => {
+      const btn = document.createElement("button");
+      btn.className = "class-btn" + (id === this.myClassId ? " selected" : "");
+      btn.textContent = label;
+      btn.onclick = () => {
+        this.myClassId = id;
+        localStorage.setItem("itsen_classId", id);
+        this._renderClassButtons();
+        this._renderSkillPanel();
+      };
+      this.lobbyClassRowEl.appendChild(btn);
+    });
+  }
+
+  // Rewrites the title screen's Q/W/E skill panel + triangle-hint sentence
+  // for the currently-selected class (see CLASS_SKILL_INFO) — called once
+  // on init and again every time a different class button is clicked, so
+  // the panel never shows a class other than the one actually selected
+  // (previously hardcoded to swordsman's skills regardless of pick).
+  _renderSkillPanel() {
+    const info = CLASS_SKILL_INFO[this.myClassId] || CLASS_SKILL_INFO[DEFAULT_CLASS_ID];
+    const row = (key, cssVar) => `
+      <div class="skill-row" style="--c:${cssVar}">
+        <span class="skill-key">${key.toUpperCase()}</span><span class="skill-icon">${info[key].icon}</span>
+        <div class="skill-text">
+          <b>${info[key].name}</b>
+          <span>${info[key].desc}</span>
+        </div>
+      </div>`;
+    this.skillRowsEl.innerHTML = row("q", "#ff9f43") + row("w", "#7ff0ff") + row("e", "#ffcc33");
+    this.triangleHintEl.innerHTML = info.triangleHtml;
+  }
+
   _joinOptions(extra) {
-    return { nickname: this.myNickname, colorIndex: this.myColorIndex, ...extra };
+    return { nickname: this.myNickname, colorIndex: this.myColorIndex, classId: this.myClassId, ...extra };
   }
 
-  _escapeHtml(str) {
-    const div = document.createElement("div");
-    div.textContent = str;
-    return div.innerHTML;
-  }
-
-  async _quickMatch() {
+  // "시작하기" joins straight into a live match — no room-browsing screen.
+  // Same join-or-create primitive the old quick-match button used; the
+  // server (ArenaRoom.onCreate/onJoin) already defaults a room name and
+  // handles capacity/spectator-overflow regardless of how the client
+  // arrived, so nothing server-side needed to change for this.
+  async _startGame() {
+    this.titleScreenEl.classList.add("hidden");
+    this.titleErrorEl.textContent = "매칭 중...";
     try {
       const room = await this._ensureClient().joinOrCreate("arena", this._joinOptions({ spectate: false }));
-      this._closeLobby();
+      this.titleErrorEl.textContent = "";
       this._wireRoom(room);
     } catch (err) {
-      this.lobbyErrorEl.textContent = `입장 실패: ${err.message || err}`;
-    }
-  }
-
-  async _createRoom() {
-    try {
-      const name = this.lobbyNameInputEl.value.trim();
-      const room = await this._ensureClient().create("arena", this._joinOptions(name ? { name } : {}));
-      this._closeLobby();
-      this._wireRoom(room);
-    } catch (err) {
-      this.lobbyErrorEl.textContent = `방 생성 실패: ${err.message || err}`;
-    }
-  }
-
-  async _joinRoom(roomId, spectate) {
-    try {
-      const room = await this._ensureClient().joinById(roomId, this._joinOptions({ spectate }));
-      this._closeLobby();
-      this._wireRoom(room);
-    } catch (err) {
-      this.lobbyErrorEl.textContent = `입장 실패: ${err.message || err}`;
+      this.titleErrorEl.textContent = `입장 실패: ${err.message || err}`;
+      this.titleScreenEl.classList.remove("hidden");
     }
   }
 
   // Leaves the current room (consented=true — server skips the reconnect
   // grace and cleans up immediately) and returns to the title screen so the
-  // player can rejoin fresh, either as a player or a spectator.
+  // player can rejoin fresh via "시작하기".
   _leaveMatch() {
     // A consented client.leave() closes with Colyseus's own WS_CLOSE_CONSENTED
     // code (4000), not the plain WS 1000 — room.onLeave still fires
@@ -903,10 +1123,13 @@ export default class NetArenaScene extends Phaser.Scene {
     this._snapshotBuffers = new Map();
     this._prevSnap.clear();
     this._kickHitFlags.clear();
+    this._comboHitFlags.clear();
+    this._shieldChargeHitFlags.clear();
+    this._blizzardFreezeFlags.clear();
     this.cameras.main.stopFollow();
     this.cameras.main.setZoom(1);
     document.body.classList.remove("spectating");
-    this._openLobby();
+    this.titleScreenEl.classList.remove("hidden");
   }
 
   // Attaches schema/lifecycle callbacks to a (re)connected room. Shared by
@@ -945,6 +1168,9 @@ export default class NetArenaScene extends Phaser.Scene {
     this._snapshotBuffers = new Map(); // sessionId -> [{t, x, y, angle, chargeTime, stunTimer, state, isAlive, score}, ...]
     this._prevSnap.clear();
     this._kickHitFlags.clear();
+    this._comboHitFlags.clear();
+    this._shieldChargeHitFlags.clear();
+    this._blizzardFreezeFlags.clear();
 
     const $ = Colyseus.getStateCallbacks(room);
     $(room.state).players.onAdd((player, sessionId) => {
@@ -980,6 +1206,9 @@ export default class NetArenaScene extends Phaser.Scene {
       this._snapshotBuffers.delete(sessionId);
       this._prevSnap.delete(sessionId);
       this._kickHitFlags.delete(sessionId);
+      this._comboHitFlags.delete(sessionId);
+      this._shieldChargeHitFlags.delete(sessionId);
+      this._blizzardFreezeFlags.delete(sessionId);
     });
 
     room.onLeave((code) => this._onRoomLeave(code));
@@ -1041,6 +1270,18 @@ export default class NetArenaScene extends Phaser.Scene {
       state: player.state,
       isAlive: player.isAlive,
       score: player.score,
+      // Not lerped, just carried through (step values, same as state/isAlive
+      // above) — without these, classSkills(undefined) falls back to
+      // swordsman's table for every OTHER player's rendering, which is
+      // missing every class-specific field (comboAttack, axeSwing, etc.),
+      // crashing the moment a networked opponent enters a class-specific
+      // state. The local player never hit this since it renders from
+      // PredictedSelf instead, which does track its own classId.
+      classId: player.classId,
+      empoweredQActive: player.empoweredQActive,
+      skillsDisabled: player.skillsDisabled,
+      fastChargeActive: player.fastChargeActive,
+      slowed: player.slowed,
     };
     buf.push(entry);
     const cutoff = entry.t - 1000;
@@ -1051,8 +1292,9 @@ export default class NetArenaScene extends Phaser.Scene {
   // interpolating between the two buffered snapshots straddling it (falling
   // back to the nearest edge sample if renderTime is outside the buffered
   // range, e.g. right after joining or during a connection hiccup). Position/
-  // angle/charge/stun are numeric-lerped; state/isAlive/score are step
-  // values so they're taken from the earlier of the two samples — a state
+  // angle/charge/stun are numeric-lerped; state/isAlive/score/classId/
+  // empoweredQActive/skillsDisabled/fastChargeActive/slowed are step values
+  // so they're taken from the earlier of the two samples — a state
   // transition should appear to happen exactly when its sample says it did,
   // not partway through.
   _getInterpolatedSnapshot(sessionId, renderTime) {
@@ -1077,6 +1319,11 @@ export default class NetArenaScene extends Phaser.Scene {
         state: a.state,
         isAlive: a.isAlive,
         score: a.score,
+        classId: a.classId,
+        empoweredQActive: a.empoweredQActive,
+        skillsDisabled: a.skillsDisabled,
+        fastChargeActive: a.fastChargeActive,
+        slowed: a.slowed,
       };
     }
     return last;
@@ -1153,6 +1400,7 @@ export default class NetArenaScene extends Phaser.Scene {
         wantsMove = this.pointerDown;
       }
 
+      const touchQ = this.touch.consumeQTap();
       const touchW = this.touch.consumeWTap();
       const touchE = this.touch.consumeETap();
 
@@ -1162,8 +1410,11 @@ export default class NetArenaScene extends Phaser.Scene {
         wantsMove,
         aimAngle,
         qHeld: this.qKey.isDown || this.touch.qHeld,
+        qPressed: this.qPressedFlag || touchQ,
+        wHeld: this.wKey.isDown || this.touch.wHeld,
         wPressed: this.wPressedFlag || touchW,
         ePressed: this.ePressedFlag || touchE,
+        eHeld: this.eKey.isDown || this.touch.eHeld,
       };
 
       const canAct = this.room.state.matchPhase === "live";
@@ -1176,6 +1427,7 @@ export default class NetArenaScene extends Phaser.Scene {
       if (this._pendingInputs.length > 600) this._pendingInputs.shift();
 
       this.room.send("input", localInput);
+      this.qPressedFlag = false;
       this.wPressedFlag = false;
       this.ePressedFlag = false;
     }
@@ -1220,7 +1472,7 @@ export default class NetArenaScene extends Phaser.Scene {
       this.hud.textContent =
         `👁 관전 중 (전투에 관여하지 않음)\n` +
         `방: ${this.room.roomId}\n` +
-        `플레이어: ${playerCount}/4   관전자: ${this.room.state.spectatorCount}`;
+        `플레이어: ${playerCount}/${NET_MAX_PLAYERS}   관전자: ${this.room.state.spectatorCount}`;
       return;
     }
 
@@ -1232,8 +1484,14 @@ export default class NetArenaScene extends Phaser.Scene {
       ? others.map(([, p]) => p.state).join(", ")
       : "상대 대기 중... (다른 브라우저 탭/창에서 net.html을 열어보세요)";
 
+    // Same class-specific skill names as the title screen's panel (see
+    // CLASS_SKILL_INFO) — was previously hardcoded to swordsman's regardless
+    // of the local player's actual class.
+    const classId = (local && local.classId) || this.myClassId || DEFAULT_CLASS_ID;
+    const skillInfo = CLASS_SKILL_INFO[classId] || CLASS_SKILL_INFO[DEFAULT_CLASS_ID];
+
     this.hud.textContent =
-      `L-Click Hold: 이동 (마우스 방향)   Q: 발도술   W: 반격자세   E: 발차기\n` +
+      `L-Click Hold: 이동 (마우스 방향)   Q: ${skillInfo.q.name}   W: ${skillInfo.w.name}   E: ${skillInfo.e.name}\n` +
       `방: ${this.room.roomId}\n` +
       `나: ${local ? local.state : "-"}\n` +
       `상대: ${oppText}`;

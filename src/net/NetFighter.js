@@ -79,6 +79,7 @@ export default class NetFighter {
     const { x, y, angle, state, chargeTime, stunTimer, isAlive } = snapshot;
     this._clock += dtMs;
     this._skills = classSkills(snapshot.classId);
+    this._empoweredQActive = snapshot.empoweredQActive; // read by _drawFigure's hammer-head glow
 
     const prevState = this._prevState;
     if (state !== prevState) {
@@ -162,10 +163,26 @@ export default class NetFighter {
       this._updateDashScratch();
     }
 
-    this._drawFigure(state, chargeTime, moving);
-    this._drawKickCone(state);
-    this._drawAuraRing(state, chargeTime, stunTimer);
+    const pose = this._computePose(state, chargeTime, moving, snapshot.fastChargeActive);
+    this._drawFigure(state, pose);
+    this._drawKickCone(state, chargeTime, snapshot.fastChargeActive);
+    this._drawAuraRing(
+      state,
+      chargeTime,
+      stunTimer,
+      pose,
+      snapshot.empoweredQActive,
+      snapshot.skillsDisabled,
+      snapshot.fastChargeActive,
+      snapshot.slowed
+    );
   }
+
+  // Activation SFX for state transitions live in NetArenaScene's
+  // _detectFighterEvents (matching Combatant.js's call sites one-for-one),
+  // not here — that function already runs for every fighter including the
+  // local player, so duplicating it in this purely-visual class would just
+  // double-fire every sound.
 
   // ---- Q feedback FX (ported from Combatant.js) ------------------------
 
@@ -468,7 +485,7 @@ export default class NetFighter {
     }
   }
 
-  _computePose(state, chargeTime, moving) {
+  _computePose(state, chargeTime, moving, fastChargeActive) {
     const r = PLAYER.RADIUS;
     const lerp = Phaser.Math.Linear;
     let grip = { x: -r * 0.05, y: r * 0.25 };
@@ -476,6 +493,8 @@ export default class NetFighter {
     let footL = { x: -r * 0.3, y: -r * 0.3 };
     let footR = { x: -r * 0.3, y: r * 0.3 };
     let headX = r * 0.25;
+    let shield = null;
+    const weaponStyle = this._skills.visual?.weaponStyle || "blade";
 
     switch (state) {
       case STATES.CHARGING: {
@@ -488,18 +507,82 @@ export default class NetFighter {
         break;
       }
       case STATES.DASH:
-        grip = { x: r * 0.7, y: -r * 0.05 };
-        tip = { x: r * 2.3, y: -r * 0.35 };
-        footL = { x: r * 0.75, y: r * 0.3 };
-        footR = { x: -r * 1.35, y: -r * 0.35 };
-        headX = r * 0.45;
+        if (weaponStyle === "hammer") {
+          // Forward swing follow-through — same strike silhouette as the
+          // combo cone swing, instead of a blade-point lunge.
+          grip = { x: r * 0.4, y: r * 0.5 };
+          tip = { x: r * 1.5, y: r * 1.1 };
+          footL = { x: r * 0.5, y: -r * 0.3 };
+          footR = { x: -r * 1.1, y: r * 0.15 };
+          headX = r * 0.35;
+        } else {
+          grip = { x: r * 0.7, y: -r * 0.05 };
+          tip = { x: r * 2.3, y: -r * 0.35 };
+          footL = { x: r * 0.75, y: r * 0.3 };
+          footR = { x: -r * 1.35, y: -r * 0.35 };
+          headX = r * 0.45;
+        }
         break;
       case STATES.PARRYING:
         grip = { x: r * 0.35, y: -r * 0.4 };
         tip = { x: r * 0.35, y: r * 0.65 };
         footL = { x: -r * 0.5, y: -r * 0.55 };
         footR = { x: -r * 0.5, y: r * 0.55 };
+        if (this._skills.skillTypes.w === "heldGuard") {
+          shield = { x: r * 0.15, y: -r * 0.65, w: r * 0.22, h: r * 1.3 };
+        }
         break;
+      case STATES.SHIELD_CHARGE:
+        grip = { x: r * 0.55, y: -r * 0.05 };
+        tip = { x: r * 1.1, y: -r * 0.1 };
+        footL = { x: r * 0.6, y: r * 0.25 };
+        footR = { x: -r * 1.1, y: -r * 0.3 };
+        headX = r * 0.4;
+        shield = { x: r * 0.5, y: -r * 0.55, w: r * 0.24, h: r * 1.1 };
+        break;
+      case STATES.COMBO_WINDOW:
+        grip = { x: r * 0.1, y: r * 0.1 };
+        tip = { x: r * 0.5, y: r * 0.3 };
+        footL = { x: -r * 0.4, y: -r * 0.3 };
+        footR = { x: -r * 0.4, y: r * 0.3 };
+        break;
+      case STATES.COMBO_ATTACK: {
+        grip = { x: -r * 0.2, y: -r * 0.3 };
+        footL = { x: -r * 0.3, y: -r * 0.3 };
+        footR = { x: -r * 0.4, y: r * 0.3 };
+        const combo = this._skills.comboAttack;
+        const comboElapsed = this._sinceStateMs;
+        if (comboElapsed <= combo.ACTIVE_MS) {
+          const t = Phaser.Math.Clamp(comboElapsed / combo.ACTIVE_MS, 0, 1);
+          tip = { x: lerp(-r * 0.9, r * 1.6, t), y: lerp(-r * 0.5, r * 0.4, t) };
+        } else {
+          const t = Phaser.Math.Clamp(
+            (comboElapsed - combo.ACTIVE_MS) / (combo.TOTAL_MS - combo.ACTIVE_MS),
+            0,
+            1
+          );
+          tip = { x: lerp(r * 1.6, r * 0.2, t), y: lerp(r * 0.4, r * 0.6, t) };
+        }
+        break;
+      }
+      case STATES.EMPOWERED_STRIKE: {
+        // Big rooted overhead-to-forward smash — the character doesn't
+        // travel anywhere, only the hammer arcs down across the line AOE.
+        const cfg = this._skills.empoweredStrike;
+        const elapsed = this._sinceStateMs;
+        footL = { x: r * 0.3, y: -r * 0.4 };
+        footR = { x: -r * 0.5, y: r * 0.4 };
+        headX = r * 0.3;
+        if (elapsed <= cfg.ACTIVE_MS) {
+          const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
+          grip = { x: lerp(-r * 0.3, r * 0.6, t), y: lerp(-r * 0.9, r * 0.5, t) };
+          tip = { x: lerp(-r * 1.0, r * 2.4, t), y: lerp(-r * 1.3, r * 0.85, t) };
+        } else {
+          grip = { x: r * 0.6, y: r * 0.5 };
+          tip = { x: r * 2.4, y: r * 0.85 };
+        }
+        break;
+      }
       case STATES.KICKING: {
         grip = { x: -r * 0.25, y: r * 0.25 };
         tip = { x: -r * 1.0, y: r * 0.55 };
@@ -526,6 +609,104 @@ export default class NetFighter {
         footL = { x: -r * 0.35, y: -r * 0.25 };
         footR = { x: -r * 0.35, y: r * 0.25 };
         break;
+      case STATES.AXE_SWING: {
+        // Self-centered spin: grip/tip sweep a full circle around the body
+        // over the swing's active window, reading as a wide 360-degree cut.
+        const cfg = this._skills.axeSwing;
+        const t = Phaser.Math.Clamp(this._sinceStateMs / cfg.TOTAL_MS, 0, 1);
+        const ang = t * Math.PI * 2.4;
+        grip = { x: Math.cos(ang) * r * 0.3, y: Math.sin(ang) * r * 0.3 };
+        tip = { x: Math.cos(ang) * r * 1.9, y: Math.sin(ang) * r * 1.9 };
+        footL = { x: -r * 0.35, y: -r * 0.4 };
+        footR = { x: -r * 0.35, y: r * 0.4 };
+        break;
+      }
+      case STATES.BATTLE_CRY:
+        // Raised fists / roaring stance — both weapons pulled in and up.
+        grip = { x: r * 0.1, y: -r * 0.15 };
+        tip = { x: r * 0.2, y: -r * 0.75 };
+        footL = { x: -r * 0.4, y: -r * 0.35 };
+        footR = { x: -r * 0.4, y: r * 0.35 };
+        headX = r * 0.3;
+        break;
+      case STATES.SLAM_CHARGE: {
+        // Crouched wind-up, ratio-driven like CHARGING — off the real
+        // synced chargeTime, so this stays in sync for remote players too.
+        const ratio = chargeTime / this._skills.divingSlam.MAX_CHARGE_MS;
+        grip = { x: lerp(-r * 0.15, r * 0.3, ratio), y: lerp(r * 0.2, -r * 0.5, ratio) };
+        tip = { x: lerp(-r * 0.5, r * 0.5, ratio), y: lerp(r * 0.5, -r * 1.1, ratio) };
+        footL = { x: -r * 0.55, y: -r * 0.5 };
+        footR = { x: -r * 0.55, y: r * 0.5 };
+        headX = r * 0.1;
+        break;
+      }
+      case STATES.SLAMMING:
+        // Tucked-forward leap — flat fast travel.
+        grip = { x: r * 0.3, y: -r * 0.3 };
+        tip = { x: r * 0.9, y: -r * 0.55 };
+        footL = { x: r * 0.2, y: -r * 0.2 };
+        footR = { x: r * 0.2, y: r * 0.2 };
+        headX = r * 0.3;
+        break;
+      case STATES.SLAM_IMPACT: {
+        // Driven-down double-axe pose at the landing spot.
+        const cfg = this._skills.divingSlam;
+        const t = Phaser.Math.Clamp(this._sinceStateMs / cfg.ACTIVE_MS, 0, 1);
+        grip = { x: lerp(r * 0.3, r * 0.1, t), y: lerp(-r * 0.9, r * 0.4, t) };
+        tip = { x: lerp(r * 0.9, r * 0.4, t), y: lerp(-r * 1.3, r * 0.8, t) };
+        footL = { x: -r * 0.3, y: -r * 0.4 };
+        footR = { x: -r * 0.3, y: r * 0.4 };
+        break;
+      }
+      case STATES.LASER_CHARGE: {
+        // Staff raised and leveled forward, ratio-driven like Q's CHARGING
+        // — only reaches full extension once the effective charge threshold
+        // (fastCharge-aware, same as the server) is actually met.
+        const laser = this._skills.laserBeam;
+        const minChargeMs =
+          fastChargeActive && this._skills.fastCharge ? this._skills.fastCharge.CHARGE_MS : laser.MIN_CHARGE_MS;
+        const ratio = Phaser.Math.Clamp(chargeTime / minChargeMs, 0, 1);
+        grip = { x: lerp(-r * 0.1, r * 0.35, ratio), y: lerp(r * 0.2, -r * 0.15, ratio) };
+        tip = { x: lerp(-r * 0.6, r * 1.3, ratio), y: lerp(r * 0.35, -r * 0.2, ratio) };
+        footL = { x: -r * 0.55, y: -r * 0.5 };
+        footR = { x: -r * 0.55, y: r * 0.5 };
+        headX = r * 0.1;
+        break;
+      }
+      case STATES.LASER_FIRE:
+        // Staff leveled and held steady along the beam for the whole window
+        // — the beam itself (drawn separately) sells the attack.
+        grip = { x: r * 0.35, y: -r * 0.15 };
+        tip = { x: r * 1.3, y: -r * 0.2 };
+        footL = { x: -r * 0.55, y: -r * 0.5 };
+        footR = { x: -r * 0.55, y: r * 0.5 };
+        headX = r * 0.1;
+        break;
+      case STATES.FLUID:
+        // Staff pulled in close, arms loose — reads as insubstantial rather
+        // than a combat pose.
+        grip = { x: r * 0.05, y: r * 0.1 };
+        tip = { x: r * 0.1, y: r * 0.55 };
+        footL = { x: -r * 0.3, y: -r * 0.35 };
+        footR = { x: -r * 0.3, y: r * 0.35 };
+        break;
+      case STATES.BLIZZARD: {
+        // Staff swept across the cone's arc over the active window —
+        // symmetric since the cone itself is 180 degrees.
+        const cfg = this._skills.blizzard;
+        footL = { x: -r * 0.35, y: -r * 0.4 };
+        footR = { x: -r * 0.35, y: r * 0.4 };
+        if (this._sinceStateMs <= cfg.ACTIVE_MS) {
+          const t = Phaser.Math.Clamp(this._sinceStateMs / cfg.ACTIVE_MS, 0, 1);
+          const ang = lerp(-Math.PI * 0.4, Math.PI * 0.4, t);
+          grip = { x: r * 0.15, y: 0 };
+          tip = { x: Math.cos(ang) * r * 1.4, y: Math.sin(ang) * r * 1.4 };
+        } else {
+          grip = { x: r * 0.15, y: 0 };
+          tip = { x: r * 1.4, y: 0 };
+        }
+        break;
+      }
       default:
         if (moving) {
           const swing = Math.sin(this._clock * 0.014) * r * 0.42;
@@ -535,21 +716,37 @@ export default class NetFighter {
         break;
     }
 
-    return { grip, tip, footL, footR, headX };
+    // Elapsed-time approximation of Combatant.isInvincible (battle-cry and
+    // fluid-state branches) — NetFighter has no synced countdown to check
+    // exactly (same imprecision already accepted for COMBO_ATTACK/
+    // EMPOWERED_STRIKE's active-window poses above), close enough for a
+    // visual tint.
+    const invincible =
+      (state === STATES.BATTLE_CRY && this._sinceStateMs < this._skills.battleCry.DURATION_MS) ||
+      (state === STATES.FLUID && this._sinceStateMs < this._skills.fluidState.DURATION_MS);
+
+    return { grip, tip, footL, footR, headX, weaponStyle, shield, invincible };
   }
 
-  _drawFigure(state, chargeTime, moving) {
+  _drawFigure(state, pose) {
     const g = this.figure;
     g.clear();
 
     const r = PLAYER.RADIUS;
-    const { grip, tip, footL, footR, headX } = this._computePose(state, chargeTime, moving);
+    const { grip, tip, footL, footR, headX, weaponStyle, shield, invincible } = pose;
     const hip = { x: -r * 0.2, y: 0 };
     const neck = { x: r * 0.05, y: 0 };
+    const armored = weaponStyle === "hammer";
+    const isAxes = weaponStyle === "axes";
+    const isStaff = weaponStyle === "staff";
+    // Knight reads heavier/metallic; Warrior reads leather-tan; Mage reads
+    // robe-purple.
+    const limbColor = armored ? 0xb0b6c2 : isAxes ? 0xd9c9a3 : isStaff ? 0xb39ddb : 0xe8e8f0;
+    const limbWidth = armored ? 5 : isAxes ? 4.5 : isStaff ? 4.5 : 4;
 
     g.setRotation(state === STATES.STUNNED ? Math.sin(this._clock * 0.02) * 0.12 : 0);
 
-    g.lineStyle(4, 0xe8e8f0, 0.95);
+    g.lineStyle(limbWidth, limbColor, 0.95);
     g.beginPath();
     g.moveTo(hip.x, hip.y);
     g.lineTo(footL.x, footL.y);
@@ -559,59 +756,492 @@ export default class NetFighter {
     g.lineTo(hip.x, hip.y);
     g.strokePath();
 
-    g.lineStyle(3.5, 0xe8e8f0, 0.95);
+    g.lineStyle(armored ? 4.5 : isAxes ? 4.5 : 3.5, limbColor, 0.95);
     g.beginPath();
     g.moveTo(neck.x, -r * 0.3);
     g.lineTo(neck.x, r * 0.3);
     g.strokePath();
 
-    g.lineStyle(3, 0xe8e8f0, 0.95);
+    if (armored) {
+      // Chest plate: a small diamond straddling the shoulder line, reading
+      // as breastplate bulk instead of a bare torso line.
+      g.fillStyle(0x8a909c, 0.9);
+      g.fillPoints(
+        [
+          { x: neck.x + r * 0.16, y: 0 },
+          { x: neck.x, y: -r * 0.22 },
+          { x: neck.x - r * 0.1, y: 0 },
+          { x: neck.x, y: r * 0.22 },
+        ],
+        true
+      );
+    }
+
+    g.lineStyle(3, limbColor, 0.95);
     g.beginPath();
     g.moveTo(neck.x, neck.y);
     g.lineTo(grip.x, grip.y);
     g.strokePath();
 
-    g.lineStyle(3, 0xd7dcec, 1);
-    g.beginPath();
-    g.moveTo(grip.x, grip.y);
-    g.lineTo(tip.x, tip.y);
-    g.strokePath();
-    g.fillStyle(0xd4af37, 0.9);
-    g.fillCircle(grip.x, grip.y, 2.6);
+    if (armored) {
+      // Wooden haft (grip -> tip), metal head drawn separately below at tip
+      // — two-tone reads as a hammer, not a uniform blade.
+      g.lineStyle(4, 0x6b4a2b, 1);
+      g.beginPath();
+      g.moveTo(grip.x, grip.y);
+      g.lineTo(tip.x, tip.y);
+      g.strokePath();
+      g.fillStyle(0x4a3320, 0.9);
+      g.fillCircle(grip.x, grip.y, 2.8);
+    } else if (isAxes) {
+      // Short dark leather-wrapped handle — the axe head is drawn
+      // separately at the tip end below.
+      g.lineStyle(3, 0x4a3320, 1);
+      g.beginPath();
+      g.moveTo(grip.x, grip.y);
+      g.lineTo(tip.x, tip.y);
+      g.strokePath();
+      g.fillStyle(0x2c2018, 0.9);
+      g.fillCircle(grip.x, grip.y, 2.4);
+    } else if (isStaff) {
+      // Dark wooden shaft — the glowing orb is drawn separately at the tip
+      // below.
+      g.lineStyle(3, 0x4a3b2e, 1);
+      g.beginPath();
+      g.moveTo(grip.x, grip.y);
+      g.lineTo(tip.x, tip.y);
+      g.strokePath();
+      g.fillStyle(0x2c2018, 0.9);
+      g.fillCircle(grip.x, grip.y, 2.6);
+    } else {
+      g.lineStyle(3, 0xd7dcec, 1);
+      g.beginPath();
+      g.moveTo(grip.x, grip.y);
+      g.lineTo(tip.x, tip.y);
+      g.strokePath();
+      g.fillStyle(0xd4af37, 0.9);
+      g.fillCircle(grip.x, grip.y, 2.6);
+    }
 
+    if (armored) {
+      // A short rectangle perpendicular to the haft at the tip end, reading
+      // as a hammer head rather than a blade point. Glows yellow while the
+      // empowered-Q buff is active (or during the empowered strike itself).
+      const angle = Math.atan2(tip.y - grip.y, tip.x - grip.x);
+      const fx = Math.cos(angle);
+      const fy = Math.sin(angle);
+      const px = -fy;
+      const py = fx;
+      const halfLen = 8;
+      const halfW = 6;
+      const empowered = this._empoweredQActive || state === STATES.EMPOWERED_STRIKE;
+      g.fillStyle(empowered ? 0xffe066 : 0x74777f, 1);
+      g.fillPoints(
+        [
+          { x: tip.x + fx * halfLen + px * halfW, y: tip.y + fy * halfLen + py * halfW },
+          { x: tip.x + fx * halfLen - px * halfW, y: tip.y + fy * halfLen - py * halfW },
+          { x: tip.x - fx * halfLen - px * halfW, y: tip.y - fy * halfLen - py * halfW },
+          { x: tip.x - fx * halfLen + px * halfW, y: tip.y - fy * halfLen + py * halfW },
+        ],
+        true
+      );
+      g.lineStyle(1, empowered ? 0xfff3b0 : 0x3f4147, 0.9);
+      g.strokePoints(
+        [
+          { x: tip.x + fx * halfLen + px * halfW, y: tip.y + fy * halfLen + py * halfW },
+          { x: tip.x + fx * halfLen - px * halfW, y: tip.y + fy * halfLen - py * halfW },
+          { x: tip.x - fx * halfLen - px * halfW, y: tip.y - fy * halfLen - py * halfW },
+          { x: tip.x - fx * halfLen + px * halfW, y: tip.y - fy * halfLen + py * halfW },
+        ],
+        true
+      );
+    }
+
+    if (isAxes) {
+      // Small single-bladed hatchet head at the tip, drawn for both the
+      // primary hand and a mirrored off-hand axe.
+      const drawAxeHead = (gx, gy, tx, ty) => {
+        const angle = Math.atan2(ty - gy, tx - gx);
+        const fx = Math.cos(angle);
+        const fy = Math.sin(angle);
+        const px = -fy;
+        const py = fx;
+        g.fillStyle(0x9aa2ad, 1);
+        g.fillPoints(
+          [
+            { x: tx - fx * 3.5, y: ty - fy * 3.5 },
+            { x: tx + fx * 1.5 + px * 6, y: ty + fy * 1.5 + py * 6 },
+            { x: tx + fx * 3.5 + px * 2, y: ty + fy * 3.5 + py * 2 },
+            { x: tx + fx * 2, y: ty + fy * 2 },
+          ],
+          true
+        );
+      };
+      drawAxeHead(grip.x, grip.y, tip.x, tip.y);
+
+      const offGrip = { x: grip.x, y: -grip.y };
+      const offTip = { x: tip.x, y: -tip.y };
+      g.lineStyle(3, limbColor, 0.95);
+      g.beginPath();
+      g.moveTo(neck.x, neck.y);
+      g.lineTo(offGrip.x, offGrip.y);
+      g.strokePath();
+      g.lineStyle(3, 0x4a3320, 1);
+      g.beginPath();
+      g.moveTo(offGrip.x, offGrip.y);
+      g.lineTo(offTip.x, offTip.y);
+      g.strokePath();
+      g.fillStyle(0x2c2018, 0.9);
+      g.fillCircle(offGrip.x, offGrip.y, 2.4);
+      drawAxeHead(offGrip.x, offGrip.y, offTip.x, offTip.y);
+    }
+
+    if (isStaff) {
+      // Glowing orb at the staff tip — pulses faster/brighter while
+      // actively charging or firing the laser, dim idle otherwise.
+      const active = state === STATES.LASER_CHARGE || state === STATES.LASER_FIRE;
+      const glow = active ? 0.7 + 0.3 * Math.sin(this._clock * 0.06) : 0.55 + 0.15 * Math.sin(this._clock * 0.015);
+      g.fillStyle(0xd9bfff, glow);
+      g.fillCircle(tip.x, tip.y, active ? 6 : 4.5);
+      g.lineStyle(1.5, 0xf3e8ff, 0.8);
+      g.strokeCircle(tip.x, tip.y, active ? 6 : 4.5);
+    }
+
+    // Head shape is a per-class visual pick (this._skills.visual.headShape)
+    // — square reads as a helmet, distinct from the swordsman's bare head.
+    const headShape = this._skills.visual?.headShape || "circle";
+    const headR = r * 0.32;
     g.fillStyle(this.color, 1);
-    g.fillCircle(headX, 0, r * 0.32);
     g.lineStyle(2, 0xffffff, 0.6);
-    g.strokeCircle(headX, 0, r * 0.32);
+    if (headShape === "square") {
+      g.fillRect(headX - headR, -headR, headR * 2, headR * 2);
+      g.strokeRect(headX - headR, -headR, headR * 2, headR * 2);
+    } else {
+      g.fillCircle(headX, 0, headR);
+      g.strokeCircle(headX, 0, headR);
+    }
+    if (armored) {
+      // Helmet brow line — a bar across the upper head reads as a
+      // visor/helm rim instead of a bare head.
+      g.lineStyle(2, 0xb0b6c2, 0.85);
+      g.beginPath();
+      if (headShape === "square") {
+        g.moveTo(headX - headR, -headR * 0.15);
+        g.lineTo(headX + headR, -headR * 0.15);
+      } else {
+        g.arc(headX, 0, headR, Math.PI * 1.15, Math.PI * 1.85, false);
+      }
+      g.strokePath();
+    }
+    if (headShape === "horned") {
+      // Two small triangular horns angled up-and-out from the sides of the
+      // head, reading as a viking helmet.
+      g.fillStyle(0xe8e2d0, 0.95);
+      for (const side of [1, -1]) {
+        const bx = headX - headR * 0.15;
+        const by = side * headR * 0.75;
+        g.fillPoints(
+          [
+            { x: bx, y: by },
+            { x: bx - headR * 0.85, y: by + side * headR * 1.4 },
+            { x: bx + headR * 0.45, y: by + side * headR * 0.5 },
+          ],
+          true
+        );
+      }
+    }
+    if (headShape === "cone") {
+      // Pointed wizard hat: a wide brim ellipse at the head's base plus a
+      // tall triangle rising off-center, reading as a cone hat rather than
+      // a bare head.
+      g.fillStyle(0x4a3b6e, 0.95);
+      g.fillEllipse(headX, 0, headR * 2.3, headR * 0.9);
+      g.fillPoints(
+        [
+          { x: headX - headR * 0.6, y: -headR * 0.15 },
+          { x: headX + headR * 0.9, y: headR * 0.15 },
+          { x: headX + headR * 0.15, y: -headR * 2.1 },
+        ],
+        true
+      );
+    }
+    if (invincible) {
+      // Invincibility tint — a pulsing overlay on the head, shown only
+      // during the actual invincible phase. Color reads per-class: red for
+      // Warrior's battle cry, violet for Mage's fluid state.
+      const flash = 0.35 + 0.25 * Math.sin(this._clock * 0.05);
+      const tintColor = state === STATES.FLUID ? 0xb98cff : 0xff4040;
+      g.fillStyle(tintColor, flash);
+      if (headShape === "square") {
+        g.fillRect(headX - headR, -headR, headR * 2, headR * 2);
+      } else {
+        g.fillCircle(headX, 0, headR);
+      }
+    }
+
+    if (shield) {
+      // Tower shield, off-hand-front. A metal boss + rivet line reads as a
+      // real shield face, and a pulsing yellow-outline "light" effect reads
+      // as active blocking.
+      const glow = 0.5 + 0.5 * Math.sin(this._clock * 0.02);
+      g.fillStyle(0x8fa8c8, 0.92);
+      g.fillRoundedRect(shield.x, shield.y, shield.w, shield.h, 3);
+      const cx = shield.x + shield.w / 2;
+      const cy = shield.y + shield.h / 2;
+      g.lineStyle(1.5, 0x5c6a80, 0.7);
+      g.beginPath();
+      g.moveTo(cx, shield.y);
+      g.lineTo(cx, shield.y + shield.h);
+      g.strokePath();
+      g.fillStyle(0xd8dee8, 0.95);
+      g.fillCircle(cx, cy, Math.min(shield.w, shield.h) * 0.16);
+      g.lineStyle(2, 0xffe066, 0.35 + 0.35 * glow);
+      g.strokeRoundedRect(shield.x, shield.y, shield.w, shield.h, 3);
+    }
   }
 
-  _drawKickCone(state) {
-    this.kickCone.clear();
-    if (state !== STATES.KICKING) return;
+  // Shared "soft glow" fill+stroke for range/shape skill indicators — hand
+  // kept in sync with Combatant.js's identically-named helpers (see
+  // src/CLAUDE.md's "no shared base class" rule). Fakes a radial-gradient
+  // falloff (Phaser's Graphics object has no native gradient fill) by
+  // layering a dim full-size shape under a brighter ~60-65%-size core, plus
+  // a two-pass stroke (wide/faint outer glow + a slim/crisp inner edge)
+  // instead of one flat fill + one flat line. `fillAlpha`/`strokeAlpha` are
+  // independent, matching how every original call site already balanced a
+  // dim fill against a much stronger edge stroke.
+  _fillGlowCone(startAngle, endAngle, range, fillColor, edgeColor, fillAlpha, strokeAlpha) {
+    this.kickCone.fillStyle(fillColor, fillAlpha * 0.6);
+    this.kickCone.slice(0, 0, range, startAngle, endAngle, false);
+    this.kickCone.fillPath();
+    this.kickCone.fillStyle(fillColor, fillAlpha);
+    this.kickCone.slice(0, 0, range * 0.62, startAngle, endAngle, false);
+    this.kickCone.fillPath();
+    this.kickCone.lineStyle(7, edgeColor, strokeAlpha * 0.3);
+    this.kickCone.beginPath();
+    this.kickCone.arc(0, 0, range, startAngle, endAngle, false);
+    this.kickCone.strokePath();
+    this.kickCone.lineStyle(2.5, edgeColor, strokeAlpha);
+    this.kickCone.beginPath();
+    this.kickCone.arc(0, 0, range, startAngle, endAngle, false);
+    this.kickCone.strokePath();
+  }
 
-    const eKick = this._skills.eKick;
-    const halfAngle = Phaser.Math.DegToRad(eKick.HALF_ANGLE_DEG);
+  _fillGlowRect(length, halfW, fillColor, edgeColor, fillAlpha, strokeAlpha) {
+    this.kickCone.fillStyle(fillColor, fillAlpha * 0.6);
+    this.kickCone.fillRect(0, -halfW, length, halfW * 2);
+    const inset = halfW * 0.35;
+    this.kickCone.fillStyle(fillColor, fillAlpha);
+    this.kickCone.fillRect(0, -halfW + inset, length, (halfW - inset) * 2);
+    this.kickCone.lineStyle(6, edgeColor, strokeAlpha * 0.3);
+    this.kickCone.strokeRect(0, -halfW, length, halfW * 2);
+    this.kickCone.lineStyle(2.5, edgeColor, strokeAlpha);
+    this.kickCone.strokeRect(0, -halfW, length, halfW * 2);
+  }
+
+  _fillGlowCircle(cx, cy, radius, fillColor, edgeColor, fillAlpha, strokeAlpha) {
+    this.kickCone.fillStyle(fillColor, fillAlpha * 0.6);
+    this.kickCone.fillCircle(cx, cy, radius);
+    this.kickCone.fillStyle(fillColor, fillAlpha);
+    this.kickCone.fillCircle(cx, cy, radius * 0.65);
+    this.kickCone.lineStyle(6, edgeColor, strokeAlpha * 0.3);
+    this.kickCone.strokeCircle(cx, cy, radius);
+    this.kickCone.lineStyle(2.5, edgeColor, strokeAlpha);
+    this.kickCone.strokeCircle(cx, cy, radius);
+  }
+
+  _drawKickCone(state, chargeTime, fastChargeActive) {
+    this.kickCone.clear();
+    if (state === STATES.EMPOWERED_STRIKE) {
+      this._drawEmpoweredStrikeRect();
+      return;
+    }
+    if (state === STATES.AXE_SWING) {
+      this._drawAxeSwingRing();
+      return;
+    }
+    if (state === STATES.BATTLE_CRY) {
+      this._drawBattleCryTelegraph();
+      return;
+    }
+    if (state === STATES.SLAM_CHARGE) {
+      this._drawSlamPreview(chargeTime);
+      return;
+    }
+    if (state === STATES.SLAM_IMPACT) {
+      this._drawSlamImpactRing(chargeTime);
+      return;
+    }
+    if (state === STATES.LASER_CHARGE || state === STATES.LASER_FIRE) {
+      this._drawLaserPreview(state, chargeTime, fastChargeActive);
+      return;
+    }
+    let cfg;
+    let fillColor = 0xfff3b0;
+    let edgeColor = 0xffcc33;
+    if (state === STATES.KICKING) {
+      cfg = this._skills.eKick;
+    } else if (state === STATES.COMBO_ATTACK) {
+      cfg = this._skills.comboAttack;
+      fillColor = 0xffe8c2;
+      edgeColor = 0xd98c3a;
+    } else if (state === STATES.BLIZZARD) {
+      // Same cone-sweep shape as the melee cones above (RANGE/
+      // HALF_ANGLE_DEG line up), just icy-colored instead of a strike swipe.
+      cfg = this._skills.blizzard;
+      fillColor = 0xdff6ff;
+      edgeColor = 0x7fd0ff;
+    } else {
+      return;
+    }
+
+    const halfAngle = Phaser.Math.DegToRad(cfg.HALF_ANGLE_DEG);
     const elapsed = this._sinceStateMs;
 
-    if (elapsed <= eKick.ACTIVE_MS) {
-      const t = Phaser.Math.Clamp(elapsed / eKick.ACTIVE_MS, 0, 1);
+    if (elapsed <= cfg.ACTIVE_MS) {
+      const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
       const sweepEnd = Phaser.Math.Linear(-halfAngle, halfAngle, t);
-      this.kickCone.fillStyle(0xfff3b0, 0.75);
-      this.kickCone.slice(0, 0, eKick.RANGE, -halfAngle, sweepEnd, false);
-      this.kickCone.fillPath();
-      this.kickCone.lineStyle(3, 0xffcc33, 0.9);
-      this.kickCone.beginPath();
-      this.kickCone.arc(0, 0, eKick.RANGE, -halfAngle, sweepEnd, false);
-      this.kickCone.strokePath();
+      this._fillGlowCone(-halfAngle, sweepEnd, cfg.RANGE, fillColor, edgeColor, 0.75, 0.9);
     } else {
-      const t = Phaser.Math.Clamp((elapsed - eKick.ACTIVE_MS) / (eKick.TOTAL_MS - eKick.ACTIVE_MS), 0, 1);
-      this.kickCone.fillStyle(0xffcc33, 0.35 * (1 - t));
-      this.kickCone.slice(0, 0, eKick.RANGE, -halfAngle, halfAngle, false);
+      const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
+      this.kickCone.fillStyle(edgeColor, 0.35 * (1 - t));
+      this.kickCone.slice(0, 0, cfg.RANGE, -halfAngle, halfAngle, false);
       this.kickCone.fillPath();
     }
   }
 
-  _drawAuraRing(state, chargeTime, stunTimer) {
+  // Knight empowered Q's wide straight-line AOE, drawn in local rotated
+  // space (0,0 = character, +x = facing) — mirrors Combatant.js's
+  // _drawEmpoweredStrikeRect.
+  _drawEmpoweredStrikeRect() {
+    const cfg = this._skills.empoweredStrike;
+    const halfW = cfg.WIDTH / 2;
+    const elapsed = this._sinceStateMs;
+
+    if (elapsed <= cfg.ACTIVE_MS) {
+      const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
+      this._fillGlowRect(cfg.LENGTH, halfW, 0xffe066, 0xfff3b0, 0.6 * (1 - t * 0.3), 0.9);
+    } else {
+      const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
+      this.kickCone.fillStyle(0xffe066, 0.35 * (1 - t));
+      this.kickCone.fillRect(0, -halfW, cfg.LENGTH, cfg.WIDTH);
+    }
+  }
+
+  // Mage Q's projected beam — a thin preview rectangle that grows in length
+  // and width live with the (fastCharge-aware) charge ratio while charging,
+  // then the actual full-brightness beam rectangle once fired (same fade
+  // shape as _drawEmpoweredStrikeRect). Both length/width are derived from
+  // chargeTime alone — the server never resets it through the fire window,
+  // same trick as Warrior's slam radius — so no extra state is needed here.
+  _drawLaserPreview(state, chargeTime, fastChargeActive) {
+    const laser = this._skills.laserBeam;
+    if (state === STATES.LASER_CHARGE) {
+      const minChargeMs =
+        fastChargeActive && this._skills.fastCharge ? this._skills.fastCharge.CHARGE_MS : laser.MIN_CHARGE_MS;
+      if (chargeTime < minChargeMs) return; // not "complete" yet — nothing to preview
+      const ratio = Phaser.Math.Clamp((chargeTime - minChargeMs) / (laser.MAX_CHARGE_MS - minChargeMs), 0, 1);
+      const length = Phaser.Math.Linear(laser.MIN_LENGTH, laser.MAX_LENGTH, ratio);
+      const halfW = Phaser.Math.Linear(laser.MIN_WIDTH, laser.MAX_WIDTH, ratio) / 2;
+      const pulse = 0.35 + 0.15 * Math.sin(this._clock * 0.03);
+      this._fillGlowRect(length, halfW, 0xb98cff, 0xd9bfff, 0.22 * pulse, 0.7);
+      return;
+    }
+    // LASER_FIRE: uses the plain (non-fastCharge) floor, since by the time
+    // this state is observed the buff has already been consumed and
+    // `fastChargeActive` correctly reads false — there's no way to know in
+    // retrospect which threshold a given release actually used. This only
+    // under-scales the preview in the rare case a fastCharge-boosted shot
+    // was held well past its (much lower) threshold; the server's own hit-
+    // test is unaffected either way, this is a rendering-only approximation.
+    const minChargeMs = laser.MIN_CHARGE_MS;
+    const ratio = Phaser.Math.Clamp((chargeTime - minChargeMs) / (laser.MAX_CHARGE_MS - minChargeMs), 0, 1);
+    const length = Phaser.Math.Linear(laser.MIN_LENGTH, laser.MAX_LENGTH, ratio);
+    const halfW = Phaser.Math.Linear(laser.MIN_WIDTH, laser.MAX_WIDTH, ratio) / 2;
+    const elapsed = this._sinceStateMs;
+    if (elapsed <= laser.ACTIVE_MS) {
+      const t = Phaser.Math.Clamp(elapsed / laser.ACTIVE_MS, 0, 1);
+      this._fillGlowRect(length, halfW, 0xd9bfff, 0xf3e8ff, 0.75 * (1 - t * 0.3), 0.95);
+    } else {
+      const t = Phaser.Math.Clamp((elapsed - laser.ACTIVE_MS) / (laser.TOTAL_MS - laser.ACTIVE_MS), 0, 1);
+      this.kickCone.fillStyle(0xd9bfff, 0.35 * (1 - t));
+      this.kickCone.fillRect(0, -halfW, length, halfW * 2);
+    }
+  }
+
+  // Warrior Q's 360-degree hit radius, drawn as a plain circle around self
+  // (no facing dependency) so its "everywhere around me" shape reads at a
+  // glance.
+  _drawAxeSwingRing() {
+    const cfg = this._skills.axeSwing;
+    const elapsed = this._sinceStateMs;
+    if (elapsed <= cfg.ACTIVE_MS) {
+      const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
+      this._fillGlowCircle(0, 0, cfg.RADIUS, 0xd9c9a3, 0xd9c9a3, 0.22 * (1 - t * 0.4), 0.9);
+    } else {
+      const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
+      this.kickCone.fillStyle(0xd9c9a3, 0.12 * (1 - t));
+      this.kickCone.fillCircle(0, 0, cfg.RADIUS);
+    }
+  }
+
+  // Warrior W's AOE shout radius, telegraphed for the entire windup — the
+  // ring brightens as the burst approaches, then flashes and fades once the
+  // AOE actually fires.
+  _drawBattleCryTelegraph() {
+    const cfg = this._skills.battleCry;
+    const elapsed = this._sinceStateMs;
+    const burstStart = cfg.TOTAL_MS - cfg.ACTIVE_MS;
+    if (elapsed <= burstStart) {
+      const ratio = Phaser.Math.Clamp(elapsed / burstStart, 0, 1);
+      const pulse = 0.3 + 0.4 * ratio + 0.15 * Math.sin(this._clock * 0.03);
+      this.kickCone.lineStyle(2, 0x8a8f99, pulse);
+      this.kickCone.strokeCircle(0, 0, cfg.SHOUT_RADIUS);
+    } else {
+      const t = Phaser.Math.Clamp((elapsed - burstStart) / cfg.ACTIVE_MS, 0, 1);
+      this._fillGlowCircle(0, 0, cfg.SHOUT_RADIUS, 0x8a8f99, 0xffffff, 0.4 * (1 - t), 0.9 * (1 - t));
+    }
+  }
+
+  // Warrior E's projected landing spot during the charge — a line out to
+  // the leap distance plus a circle at the impact radius, both scaling live
+  // with the real synced chargeTime ratio. No SLAMMING-specific preview is
+  // drawn (no synced "remaining distance" to draw it from for a remote
+  // player) — the tucked-leap pose alone reads as motion during that state.
+  _drawSlamPreview(chargeTime) {
+    const slam = this._skills.divingSlam;
+    const ratio = chargeTime / slam.MAX_CHARGE_MS;
+    const leapDistance = Phaser.Math.Linear(slam.MIN_LEAP_DISTANCE, slam.MAX_LEAP_DISTANCE, ratio);
+    const impactRadius = Phaser.Math.Linear(slam.MIN_IMPACT_RADIUS, slam.MAX_IMPACT_RADIUS, ratio);
+    this.kickCone.lineStyle(2, 0xc97b3a, 0.55);
+    this.kickCone.beginPath();
+    this.kickCone.moveTo(0, 0);
+    this.kickCone.lineTo(leapDistance, 0);
+    this.kickCone.strokePath();
+    // Same "breathing" pulse as _drawLaserPreview's charge phase and
+    // _drawBattleCryTelegraph's windup.
+    const pulse = 0.06 * Math.sin(this._clock * 0.03);
+    this._fillGlowCircle(leapDistance, 0, impactRadius, 0xc97b3a, 0xc97b3a, 0.18 + pulse, 0.85 + pulse);
+  }
+
+  // Warrior E's actual impact radius at the landing spot — chargeTime is
+  // still valid here (the server never resets it through the slam
+  // sequence), so this derives the same radius the server used at release.
+  _drawSlamImpactRing(chargeTime) {
+    const cfg = this._skills.divingSlam;
+    const ratio = chargeTime / cfg.MAX_CHARGE_MS;
+    const radius = Phaser.Math.Linear(cfg.MIN_IMPACT_RADIUS, cfg.MAX_IMPACT_RADIUS, ratio);
+    const elapsed = this._sinceStateMs;
+    if (elapsed <= cfg.ACTIVE_MS) {
+      const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
+      this._fillGlowCircle(0, 0, radius, 0xc97b3a, 0xc97b3a, 0.35 * (1 - t * 0.4), 0.9);
+    } else {
+      const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
+      this.kickCone.fillStyle(0xc97b3a, 0.18 * (1 - t));
+      this.kickCone.fillCircle(0, 0, radius);
+    }
+  }
+
+  _drawAuraRing(state, chargeTime, stunTimer, pose, empoweredQActive, skillsDisabled, fastChargeActive, slowed) {
     this.auraRing.clear();
     const r = PLAYER.RADIUS;
 
@@ -631,6 +1261,57 @@ export default class NetFighter {
     } else if (state === STATES.STUNNED) {
       const pulse = r + 6 + 2 * Math.sin(this._clock * 0.015);
       this.auraRing.lineStyle(3, 0xff5c5c, 0.7 + 0.3 * Math.sin(this._clock * 0.02));
+      this.auraRing.strokeCircle(0, 0, pulse);
+    } else if (state === STATES.FLUID) {
+      // Two-phase read: violet/translucent while actually invincible, then
+      // a brighter cyan-white ring once the haste phase kicks in — reuses
+      // pose.invincible (same elapsed-time approximation _computePose
+      // already made) instead of recomputing it.
+      const pulse = r + 9 + 4 * Math.sin(this._clock * 0.03);
+      if (pose?.invincible) {
+        this.auraRing.lineStyle(3, 0xb98cff, 0.8);
+        this.auraRing.strokeCircle(0, 0, pulse);
+        this.auraRing.fillStyle(0xb98cff, 0.15);
+        this.auraRing.fillCircle(0, 0, pulse);
+      } else {
+        this.auraRing.lineStyle(3, 0x8ff0ff, 0.75 + 0.25 * Math.sin(this._clock * 0.04));
+        this.auraRing.strokeCircle(0, 0, pulse);
+      }
+    }
+
+    // Knight empowered-Q glow: persists through IDLE/movement (not tied to
+    // any one state), same always-checked pattern as Combatant.js's — a
+    // small pulsing glow at the weapon tip telegraphing "ready to use."
+    if (empoweredQActive) {
+      const tip = pose?.tip || { x: 0, y: 0 };
+      this.auraRing.fillStyle(0xffe066, 0.55 * (0.5 + 0.5 * Math.sin(this._clock * 0.05)));
+      this.auraRing.fillCircle(tip.x, tip.y, r * 0.28);
+    }
+
+    // Warrior battle-cry debuff: shown on whoever's *affected*, regardless
+    // of their own current state — a dull grey pulsing ring, same
+    // always-checked pattern as the empowered-Q glow above.
+    if (skillsDisabled) {
+      const pulse = r + 8 + 3 * Math.sin(this._clock * 0.025);
+      this.auraRing.lineStyle(3, 0x8a8f99, 0.6 + 0.25 * Math.sin(this._clock * 0.02));
+      this.auraRing.strokeCircle(0, 0, pulse);
+    }
+
+    // Mage fast-charge buff (granted by a W block or E freeze): same
+    // "use it or lose it" glow shape as the empowered-Q one above, at the
+    // staff tip instead of the weapon tip.
+    if (fastChargeActive) {
+      const tip = pose?.tip || { x: 0, y: 0 };
+      this.auraRing.fillStyle(0xd9bfff, 0.55 * (0.5 + 0.5 * Math.sin(this._clock * 0.05)));
+      this.auraRing.fillCircle(tip.x, tip.y, r * 0.28);
+    }
+
+    // Mage blizzard slow: shown on whoever's *affected*, regardless of
+    // their own class/state — a pale icy pulsing ring, same always-checked
+    // pattern as the two debuff glows above.
+    if (slowed) {
+      const pulse = r + 7 + 3 * Math.sin(this._clock * 0.02);
+      this.auraRing.lineStyle(3, 0x7fd0ff, 0.55 + 0.25 * Math.sin(this._clock * 0.03));
       this.auraRing.strokeCircle(0, 0, pulse);
     }
   }

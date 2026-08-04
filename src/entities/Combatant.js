@@ -1194,7 +1194,12 @@ export default class Combatant extends Phaser.GameObjects.Container {
     // stale travel direction from before the window opened.
     this.facing = this.aimAngle;
     const skillTypes = this.skills.skillTypes;
-    if (this.qHeld) {
+    // qPressed (a fresh edge), not qHeld — a hold-through read would also
+    // fire off the tail of the original tap that started the dash. This
+    // matches the networked port (ArenaRoom.stepComboWindow), which needs
+    // qPressed anyway since qHeld's continuous state can't be trusted not
+    // to still read true across a network round-trip.
+    if (this.qPressed) {
       this.setState(STATES.COMBO_ATTACK);
       this.stateTimer = this.skills.comboAttack.TOTAL_MS;
       this._comboHitApplied = false;
@@ -1302,6 +1307,58 @@ export default class Combatant extends Phaser.GameObjects.Container {
     }
   }
 
+  // Shared "soft glow" fill+stroke for range/shape skill indicators — fakes
+  // a radial-gradient falloff (Phaser's Graphics object has no native
+  // gradient fill) by layering a dim full-size shape under a brighter
+  // ~60-65%-size core, plus a two-pass stroke (wide/faint outer glow + a
+  // slim/crisp inner edge) instead of one flat fill + one flat line. Same
+  // "soft layered depth over a flat shape" idea ArenaScene's
+  // _spawnImpactBurst already uses (expanding ring + radiating bits) for hit
+  // VFX, just applied to a per-frame redrawn telegraph instead of a
+  // one-shot tween. `fillAlpha`/`strokeAlpha` are independent (matching how
+  // every original call site already balanced a dim fill against a much
+  // stronger edge stroke) — these three only change how that's painted, not
+  // the timing/values the caller already computed.
+  _fillGlowCone(startAngle, endAngle, range, fillColor, edgeColor, fillAlpha, strokeAlpha) {
+    this.kickCone.fillStyle(fillColor, fillAlpha * 0.6);
+    this.kickCone.slice(0, 0, range, startAngle, endAngle, false);
+    this.kickCone.fillPath();
+    this.kickCone.fillStyle(fillColor, fillAlpha);
+    this.kickCone.slice(0, 0, range * 0.62, startAngle, endAngle, false);
+    this.kickCone.fillPath();
+    this.kickCone.lineStyle(7, edgeColor, strokeAlpha * 0.3);
+    this.kickCone.beginPath();
+    this.kickCone.arc(0, 0, range, startAngle, endAngle, false);
+    this.kickCone.strokePath();
+    this.kickCone.lineStyle(2.5, edgeColor, strokeAlpha);
+    this.kickCone.beginPath();
+    this.kickCone.arc(0, 0, range, startAngle, endAngle, false);
+    this.kickCone.strokePath();
+  }
+
+  _fillGlowRect(length, halfW, fillColor, edgeColor, fillAlpha, strokeAlpha) {
+    this.kickCone.fillStyle(fillColor, fillAlpha * 0.6);
+    this.kickCone.fillRect(0, -halfW, length, halfW * 2);
+    const inset = halfW * 0.35;
+    this.kickCone.fillStyle(fillColor, fillAlpha);
+    this.kickCone.fillRect(0, -halfW + inset, length, (halfW - inset) * 2);
+    this.kickCone.lineStyle(6, edgeColor, strokeAlpha * 0.3);
+    this.kickCone.strokeRect(0, -halfW, length, halfW * 2);
+    this.kickCone.lineStyle(2.5, edgeColor, strokeAlpha);
+    this.kickCone.strokeRect(0, -halfW, length, halfW * 2);
+  }
+
+  _fillGlowCircle(cx, cy, radius, fillColor, edgeColor, fillAlpha, strokeAlpha) {
+    this.kickCone.fillStyle(fillColor, fillAlpha * 0.6);
+    this.kickCone.fillCircle(cx, cy, radius);
+    this.kickCone.fillStyle(fillColor, fillAlpha);
+    this.kickCone.fillCircle(cx, cy, radius * 0.65);
+    this.kickCone.lineStyle(6, edgeColor, strokeAlpha * 0.3);
+    this.kickCone.strokeCircle(cx, cy, radius);
+    this.kickCone.lineStyle(2.5, edgeColor, strokeAlpha);
+    this.kickCone.strokeCircle(cx, cy, radius);
+  }
+
   // Shared cone-sweep melee visual — used by the swordsman's E kick and
   // Knight's combo follow-up swing (only one of KICKING/COMBO_ATTACK is ever
   // active at once, so both can safely share the one kickCone graphics
@@ -1359,13 +1416,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
       // of just appearing, so the hit reads as a strike rather than a stamp.
       const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
       const sweepEnd = Phaser.Math.Linear(-halfAngle, halfAngle, t);
-      this.kickCone.fillStyle(fillColor, 0.75);
-      this.kickCone.slice(0, 0, cfg.RANGE, -halfAngle, sweepEnd, false);
-      this.kickCone.fillPath();
-      this.kickCone.lineStyle(3, edgeColor, 0.9);
-      this.kickCone.beginPath();
-      this.kickCone.arc(0, 0, cfg.RANGE, -halfAngle, sweepEnd, false);
-      this.kickCone.strokePath();
+      this._fillGlowCone(-halfAngle, sweepEnd, cfg.RANGE, fillColor, edgeColor, 0.75, 0.9);
     } else {
       // Recovery: cone fades out from full brightness.
       const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
@@ -1385,10 +1436,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
 
     if (elapsed <= cfg.ACTIVE_MS) {
       const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
-      this.kickCone.fillStyle(0xffe066, 0.6 * (1 - t * 0.3));
-      this.kickCone.fillRect(0, -halfW, cfg.LENGTH, cfg.WIDTH);
-      this.kickCone.lineStyle(3, 0xfff3b0, 0.9);
-      this.kickCone.strokeRect(0, -halfW, cfg.LENGTH, cfg.WIDTH);
+      this._fillGlowRect(cfg.LENGTH, halfW, 0xffe066, 0xfff3b0, 0.6 * (1 - t * 0.3), 0.9);
     } else {
       const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
       this.kickCone.fillStyle(0xffe066, 0.35 * (1 - t));
@@ -1404,10 +1452,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     const elapsed = cfg.TOTAL_MS - this.stateTimer;
     if (elapsed <= cfg.ACTIVE_MS) {
       const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
-      this.kickCone.fillStyle(0xd9c9a3, 0.22 * (1 - t * 0.4));
-      this.kickCone.fillCircle(0, 0, cfg.RADIUS);
-      this.kickCone.lineStyle(3, 0xd9c9a3, 0.9);
-      this.kickCone.strokeCircle(0, 0, cfg.RADIUS);
+      this._fillGlowCircle(0, 0, cfg.RADIUS, 0xd9c9a3, 0xd9c9a3, 0.22 * (1 - t * 0.4), 0.9);
     } else {
       const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
       this.kickCone.fillStyle(0xd9c9a3, 0.12 * (1 - t));
@@ -1430,10 +1475,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
       this.kickCone.strokeCircle(0, 0, cfg.SHOUT_RADIUS);
     } else {
       const t = Phaser.Math.Clamp((elapsed - burstStart) / cfg.ACTIVE_MS, 0, 1);
-      this.kickCone.fillStyle(0x8a8f99, 0.4 * (1 - t));
-      this.kickCone.fillCircle(0, 0, cfg.SHOUT_RADIUS);
-      this.kickCone.lineStyle(4, 0xffffff, 0.9 * (1 - t));
-      this.kickCone.strokeCircle(0, 0, cfg.SHOUT_RADIUS);
+      this._fillGlowCircle(0, 0, cfg.SHOUT_RADIUS, 0x8a8f99, 0xffffff, 0.4 * (1 - t), 0.9 * (1 - t));
     }
   }
 
@@ -1463,10 +1505,11 @@ export default class Combatant extends Phaser.GameObjects.Container {
     this.kickCone.moveTo(0, 0);
     this.kickCone.lineTo(leapDistance, 0);
     this.kickCone.strokePath();
-    this.kickCone.fillStyle(0xc97b3a, 0.18);
-    this.kickCone.fillCircle(leapDistance, 0, impactRadius);
-    this.kickCone.lineStyle(3, 0xc97b3a, 0.85);
-    this.kickCone.strokeCircle(leapDistance, 0, impactRadius);
+    // Same "breathing" pulse as _drawLaserPreview's charge phase and
+    // _drawBattleCryTelegraph's windup — previously the one charge-preview
+    // with no pulse at all.
+    const pulse = 0.06 * Math.sin(this._clock * 0.03);
+    this._fillGlowCircle(leapDistance, 0, impactRadius, 0xc97b3a, 0xc97b3a, 0.18 + pulse, 0.85 + pulse);
   }
 
   // Warrior E's actual impact radius at the landing spot, same fade shape as
@@ -1477,10 +1520,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     const radius = this._slam ? this._slam.impactRadius : cfg.MIN_IMPACT_RADIUS;
     if (elapsed <= cfg.ACTIVE_MS) {
       const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
-      this.kickCone.fillStyle(0xc97b3a, 0.35 * (1 - t * 0.4));
-      this.kickCone.fillCircle(0, 0, radius);
-      this.kickCone.lineStyle(3, 0xc97b3a, 0.9);
-      this.kickCone.strokeCircle(0, 0, radius);
+      this._fillGlowCircle(0, 0, radius, 0xc97b3a, 0xc97b3a, 0.35 * (1 - t * 0.4), 0.9);
     } else {
       const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
       this.kickCone.fillStyle(0xc97b3a, 0.18 * (1 - t));
@@ -1505,10 +1545,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
       const length = Phaser.Math.Linear(laser.MIN_LENGTH, laser.MAX_LENGTH, ratio);
       const halfW = Phaser.Math.Linear(laser.MIN_WIDTH, laser.MAX_WIDTH, ratio) / 2;
       const pulse = 0.35 + 0.15 * Math.sin(this._clock * 0.03);
-      this.kickCone.fillStyle(0xb98cff, 0.22 * pulse);
-      this.kickCone.fillRect(0, -halfW, length, halfW * 2);
-      this.kickCone.lineStyle(2, 0xd9bfff, 0.7);
-      this.kickCone.strokeRect(0, -halfW, length, halfW * 2);
+      this._fillGlowRect(length, halfW, 0xb98cff, 0xd9bfff, 0.22 * pulse, 0.7);
       return;
     }
     const cfg = this.skills.laserBeam;
@@ -1517,10 +1554,7 @@ export default class Combatant extends Phaser.GameObjects.Container {
     const elapsed = cfg.TOTAL_MS - this.stateTimer;
     if (elapsed <= cfg.ACTIVE_MS) {
       const t = Phaser.Math.Clamp(elapsed / cfg.ACTIVE_MS, 0, 1);
-      this.kickCone.fillStyle(0xd9bfff, 0.75 * (1 - t * 0.3));
-      this.kickCone.fillRect(0, -halfW, length, halfW * 2);
-      this.kickCone.lineStyle(3, 0xf3e8ff, 0.95);
-      this.kickCone.strokeRect(0, -halfW, length, halfW * 2);
+      this._fillGlowRect(length, halfW, 0xd9bfff, 0xf3e8ff, 0.75 * (1 - t * 0.3), 0.95);
     } else {
       const t = Phaser.Math.Clamp((elapsed - cfg.ACTIVE_MS) / (cfg.TOTAL_MS - cfg.ACTIVE_MS), 0, 1);
       this.kickCone.fillStyle(0xd9bfff, 0.35 * (1 - t));

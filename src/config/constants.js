@@ -33,7 +33,11 @@ export const LAYOUT = {
   OBSTACLE_MIN_H: 90,
   OBSTACLE_MAX_H: 170,
   MIN_SPACING: 160, // between any two placed hazards' centers
-  SPAWN_CLEARANCE: 260, // keep clear of both player spawn points
+  // Sized against adjacent-spawn spacing (~283px on the 10-point ring, down
+  // from the old 4-point diamond's ~750px) — left at the old 260, adjacent
+  // spawns' clearance circles would overlap heavily and starve the hazard
+  // placer (tryPlacePair() soft-fails on exhausted attempts).
+  SPAWN_CLEARANCE: 150,
   CORNER_CLEARANCE: 40, // extra margin around the octagon's chamfered corners
   PLACEMENT_ATTEMPTS: 40,
 };
@@ -71,18 +75,24 @@ export const ROUND_BANNER_MS = 1800;
 // but driven by a single server timer (room.state.phaseTimer) instead of
 // separate client-side timers per combatant.
 export const NET_COUNTDOWN_MS = 3000;
-export const NET_MAX_PLAYERS = 4; // 4-player FFA — see server/rooms/ArenaRoom.js
+export const NET_MAX_PLAYERS = 10; // 10-player FFA — see server/rooms/ArenaRoom.js
 
 // FFA spawn points as arena-fraction coordinates (multiply by ARENA.WIDTH/
-// HEIGHT for world coords) — a diamond arrangement where each opposite pair
-// (0&1, 2&3) is already 180°-symmetric about the arena center, so the
-// point-symmetric hazard layout (layoutGenerator.js) stays fair for all
-// four seats without needing a different placement algorithm.
+// HEIGHT for world coords) — a 10-point ring around the arena center, each
+// point's antipodal partner (i and i+5) exactly 180°-symmetric about the
+// center, so the point-symmetric hazard layout (layoutGenerator.js) stays
+// fair for every seat without needing a different placement algorithm.
 export const NET_SPAWN_POINTS = [
-  { x: 0.25, y: 0.5 },
-  { x: 0.75, y: 0.5 },
-  { x: 0.5, y: 0.2 },
-  { x: 0.5, y: 0.8 },
+  { x: 0.800, y: 0.500 },
+  { x: 0.743, y: 0.665 },
+  { x: 0.593, y: 0.766 },
+  { x: 0.407, y: 0.766 },
+  { x: 0.257, y: 0.665 },
+  { x: 0.200, y: 0.500 },
+  { x: 0.257, y: 0.335 },
+  { x: 0.407, y: 0.234 },
+  { x: 0.593, y: 0.234 },
+  { x: 0.743, y: 0.335 },
 ];
 
 export const PLAYER = {
@@ -274,7 +284,7 @@ export const CLASSES = {
       TOTAL_MS: 1500, // DURATION_MS + HASTE_MS
     },
     blizzard: {
-      RANGE: 60, // down to 25% of 240
+      RANGE: 120, // doubled from the original tuned-down 60 (was 25% of 240)
       HALF_ANGLE_DEG: 90, // total cone = 180 deg
       SLOW_MS: 1000, // plain-hit debuff duration (see Combatant._moveSpeed)
       VS_GUARD_STUN_MS: STUN_DURATION_MS, // freezing a PARRYING or fluid (W-active) target

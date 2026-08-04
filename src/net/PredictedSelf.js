@@ -42,6 +42,15 @@ export default class PredictedSelf {
     this._lastLoggedState = null; // DEBUG-only, see reconcile()
 
     this._dash = null; // { dx, dy, remaining }
+    this._shieldCharge = null; // Knight E: { dx, dy, remaining }
+    this._slam = null; // Warrior E: { dx, dy, remaining }
+    // Time since this.state last changed — nothing ported before Mage
+    // needed "elapsed time in state" client-side (NetFighter has its own
+    // _sinceStateMs for this exact reason), but fluidState's own-movement
+    // haste-phase switch genuinely needs one. Updated once per step() call,
+    // detected the same way NetFighter detects its own state transitions.
+    this._prevPredState = null;
+    this._stateElapsedMs = 0;
     // Resolved once from the first snapshot's classId (join-time-fixed, no
     // mid-match class change to worry about this stage) — every skill-tuning
     // read below goes through this instead of a bare constant, so a future
@@ -65,6 +74,10 @@ export default class PredictedSelf {
     this.score = snap.score;
     this.classId = snap.classId;
     this._dash = null;
+    this._shieldCharge = null;
+    this._slam = null;
+    this._prevPredState = snap.state;
+    this._stateElapsedMs = 0;
     this._skills = classSkills(snap.classId);
     this.ready = true;
   }
@@ -77,6 +90,13 @@ export default class PredictedSelf {
     // STUNNED/DEAD are never self-entered from our own input (see file
     // comment) — hold still and wait for the server's next word on it.
     if (this.state === STATES.STUNNED || this.state === STATES.DEAD) return;
+
+    if (this.state !== this._prevPredState) {
+      this._prevPredState = this.state;
+      this._stateElapsedMs = 0;
+    } else {
+      this._stateElapsedMs += dtMs;
+    }
 
     switch (this.state) {
       case STATES.IDLE:
@@ -95,7 +115,42 @@ export default class PredictedSelf {
         this._stepDash(dtMs, hazards);
         break;
       case STATES.PARRYING:
+        // heldGuard (Knight) classes are still mobile while blocking —
+        // predict that movement same as any other state. Non-heldGuard
+        // classes fall through to the same "entry only" no-op as KICKING
+        // below (a tap-parry roots you in place, nothing left to predict).
+        if (this._skills.skillTypes.w === "heldGuard") this._stepHeldGuard(dtMs, input, hazards);
+        break;
+      case STATES.SHIELD_CHARGE:
+        this._stepShieldCharge(dtMs, hazards);
+        break;
+      case STATES.BATTLE_CRY:
+        // Warrior W: mobile at full speed for the whole cast, unlike
+        // Knight's heldGuard (-65%) — see _stepBattleCry.
+        this._stepBattleCry(dtMs, input, hazards);
+        break;
+      case STATES.SLAM_CHARGE:
+        this._stepSlamCharge(dtMs, input);
+        break;
+      case STATES.SLAMMING:
+        this._stepSlamming(dtMs, hazards);
+        break;
+      case STATES.FLUID:
+        // Mage W: mobile for the whole cast, two speed phases (invincible
+        // then hasted) — see _stepFluidState.
+        this._stepFluidState(dtMs, input, hazards);
+        break;
+      case STATES.LASER_CHARGE:
+        this._stepLaserCharge(dtMs, input, hazards);
+        break;
       case STATES.KICKING:
+      case STATES.COMBO_WINDOW:
+      case STATES.COMBO_ATTACK:
+      case STATES.EMPOWERED_STRIKE:
+      case STATES.AXE_SWING:
+      case STATES.SLAM_IMPACT:
+      case STATES.LASER_FIRE:
+      case STATES.BLIZZARD:
         // Deliberately NOT self-timed out here (previously via a local
         // _stateTimer counting down to _enterGCD()) — that duration isn't
         // part of the synced schema, so every reconcile() had to guess a
@@ -106,10 +161,134 @@ export default class PredictedSelf {
         // could overshoot again — a real ping-pong that fired the entry
         // SFX/pose repeatedly for one press. The server's own state flip
         // (see reconcile()) is what ends these now; entry is still
-        // predicted instantly above, just not the exit.
+        // predicted instantly above, just not the exit. COMBO_WINDOW/
+        // COMBO_ATTACK/EMPOWERED_STRIKE extend the same policy — none of
+        // them are even locally enterable from raw input (they're outcomes
+        // of a landed/blocked hit only the server resolves), so there's
+        // nothing to predict but holding still until the next snapshot.
         break;
       default:
         break;
+    }
+  }
+
+  // Knight W (heldGuard): mobile at -65% speed while the shield is up,
+  // mirrors _moveLike's obstacle-blocked movement shape.
+  _stepHeldGuard(dtMs, input, hazards) {
+    this.angle = input.aimAngle;
+    if (!input.wantsMove) return;
+    const wParry = this._skills.wParry;
+    let speed = PLAYER.BASE_SPEED * wParry.MOVE_SPEED_MULTIPLIER;
+    if (this._inQuicksand(hazards)) speed *= SLOW_ZONE_FACTOR;
+    this._moveTowards(this.angle, (speed * dtMs) / 1000, hazards);
+  }
+
+  // Knight E: mirrors _stepDash's exact obstacle-substepping shape, against
+  // _shieldCharge instead of _dash. Same "stop advancing, hold the pose
+  // until the next snapshot" policy on a wall hit — the exact stun/GCD
+  // outcome (a wall hit vs. a landed vs-guard bonus) is left to the server.
+  _stepShieldCharge(dtMs, hazards) {
+    if (!this._shieldCharge) return;
+    const eCharge = this._skills.eShieldCharge;
+    const totalStep = Math.min((eCharge.SPEED * dtMs) / 1000, this._shieldCharge.remaining);
+    const subSteps = Math.max(1, Math.ceil(totalStep / MOVE_STEP_LIMIT));
+    const perStep = totalStep / subSteps;
+
+    for (let i = 0; i < subSteps; i++) {
+      const nx = this.x + this._shieldCharge.dx * perStep;
+      const ny = this.y + this._shieldCharge.dy * perStep;
+      if (this._hitsObstacle(nx, ny, hazards)) {
+        this._shieldCharge = null;
+        this.state = STATES.STUNNED;
+        return;
+      }
+      this.x = nx;
+      this.y = ny;
+      this._shieldCharge.remaining -= perStep;
+    }
+  }
+
+  // Warrior W: mobile at full BASE_SPEED for the whole cast (unlike
+  // Knight's heldGuard, no speed multiplier) — mirrors _moveLike exactly.
+  // The invincibility-block/debuff resolution itself is never predicted
+  // (a hit outcome, server-only), just the movement.
+  _stepBattleCry(dtMs, input, hazards) {
+    this._moveLike(dtMs, input, PLAYER.BASE_SPEED, hazards);
+  }
+
+  // Warrior E, phase 1/2: hold to charge — mirrors _stepCharging's shape but
+  // for E/divingSlam. Deliberately does NOT reset chargeTime here so it
+  // stays valid for _drawSlamPreview/_drawSlamImpactRing through the whole
+  // sequence, matching the server (see ArenaRoom.stepSlamCharge).
+  _stepSlamCharge(dtMs, input) {
+    // Rooted in place while charging (mirrors _updateSlamCharge — only the
+    // facing angle tracks live input, no movement).
+    this.angle = input.aimAngle;
+
+    const slam = this._skills.divingSlam;
+    this.chargeTime = Math.min(this.chargeTime + dtMs, slam.MAX_CHARGE_MS);
+    if (!input.eHeld) {
+      const ratio = this.chargeTime / slam.MAX_CHARGE_MS;
+      const distance = slam.MIN_LEAP_DISTANCE + (slam.MAX_LEAP_DISTANCE - slam.MIN_LEAP_DISTANCE) * ratio;
+      this._slam = { dx: Math.cos(this.angle), dy: Math.sin(this.angle), remaining: distance };
+      this.state = STATES.SLAMMING;
+    }
+  }
+
+  // Warrior E, phase 2/2: mirrors _stepShieldCharge's exact obstacle-
+  // substepping shape, against _slam instead of _shieldCharge.
+  _stepSlamming(dtMs, hazards) {
+    if (!this._slam) return;
+    const slam = this._skills.divingSlam;
+    const totalStep = Math.min((slam.LEAP_SPEED * dtMs) / 1000, this._slam.remaining);
+    const subSteps = Math.max(1, Math.ceil(totalStep / MOVE_STEP_LIMIT));
+    const perStep = totalStep / subSteps;
+
+    for (let i = 0; i < subSteps; i++) {
+      const nx = this.x + this._slam.dx * perStep;
+      const ny = this.y + this._slam.dy * perStep;
+      if (this._hitsObstacle(nx, ny, hazards)) {
+        this._slam = null;
+        this.state = STATES.STUNNED;
+        return;
+      }
+      this.x = nx;
+      this.y = ny;
+      this._slam.remaining -= perStep;
+    }
+  }
+
+  // Mage W: mobile for the whole cast — invincible phase then a haste
+  // phase, picked from _stateElapsedMs (mirrors ArenaRoom.stepFluidState's
+  // stateTimer check, just measured forward instead of counting down). The
+  // invincibility-block resolution itself is never predicted (a hit
+  // outcome, server-only), just the movement.
+  _stepFluidState(dtMs, input, hazards) {
+    const cfg = this._skills.fluidState;
+    const hasted = this._stateElapsedMs >= cfg.DURATION_MS;
+    this._moveLike(dtMs, input, PLAYER.BASE_SPEED * (hasted ? cfg.HASTE_MULTIPLIER : 1), hazards);
+  }
+
+  // Mage Q: hold to charge — mirrors _stepCharging's movement shape, but
+  // release before the effective threshold just cancels (no beam) instead
+  // of firing a scaled-down one. Predicts the *default* (non-fastCharge)
+  // MIN_CHARGE_MS threshold locally, matching the established policy of not
+  // predicting buff-driven redirects client-side (e.g. Knight's
+  // empoweredQMs) — reconcile() corrects from the next snapshot on the rare
+  // occasion the real fast-charge threshold applied. Deliberately does NOT
+  // reset chargeTime on release, same as Warrior's slam charge, so it stays
+  // valid for NetFighter's laser-preview through the fire window.
+  _stepLaserCharge(dtMs, input, hazards) {
+    this.angle = input.aimAngle;
+    const speed = this._inQuicksand(hazards)
+      ? PLAYER.BASE_SPEED * PLAYER.CHARGE_SPEED_FACTOR * SLOW_ZONE_FACTOR
+      : PLAYER.BASE_SPEED * PLAYER.CHARGE_SPEED_FACTOR;
+    if (input.wantsMove) this._moveTowards(this.angle, (speed * dtMs) / 1000, hazards);
+
+    const laser = this._skills.laserBeam;
+    this.chargeTime = Math.min(this.chargeTime + dtMs, laser.MAX_CHARGE_MS);
+    if (!input.qHeld) {
+      this.state = this.chargeTime >= laser.MIN_CHARGE_MS ? STATES.LASER_FIRE : STATES.GCD;
     }
   }
 
@@ -120,18 +299,79 @@ export default class PredictedSelf {
     this._moveTowards(this.angle, (speed * dtMs) / 1000, hazards);
   }
 
+  // Mirrors ArenaRoom.tryStartSkills' shape: Q/W/E each dispatched
+  // independently, branching on skillTypes instead of assuming swordsman's
+  // shapes. comboDash's empoweredQMs-buff redirect (-> a stationary strike
+  // instead of a dash) isn't predicted here — that buff isn't part of the
+  // synced schema PredictedSelf tracks, so a tap always predicts a plain
+  // dash locally; reconcile() corrects to EMPOWERED_STRIKE from the next
+  // snapshot on the rare occasion the buff was actually active.
   _tryStartSkills(input) {
-    if (input.qHeld) {
+    const skillTypes = this._skills.skillTypes;
+
+    if (skillTypes.q === "comboDash") {
+      if (input.qPressed) {
+        const qDash = this._skills.qDash;
+        this._dash = { dx: Math.cos(this.angle), dy: Math.sin(this.angle), remaining: qDash.DISTANCE };
+        this.state = STATES.DASH;
+        return;
+      }
+    } else if (skillTypes.q === "axeSwing") {
+      // No hold-to-charge, no travel — enter directly, hit outcome is
+      // never predicted locally (see the KICKING/etc. no-op group in step()).
+      if (input.qPressed) {
+        this.state = STATES.AXE_SWING;
+        return;
+      }
+    } else if (skillTypes.q === "laserBeam") {
+      if (input.qHeld) {
+        this.state = STATES.LASER_CHARGE;
+        this.chargeTime = 0;
+        return;
+      }
+    } else if (input.qHeld) {
       this.state = STATES.CHARGING;
       this.chargeTime = 0;
       this._dash = null;
       return;
     }
-    if (input.wPressed) {
+
+    if (skillTypes.w === "heldGuard") {
+      if (input.wHeld) {
+        this.state = STATES.PARRYING;
+        return;
+      }
+    } else if (skillTypes.w === "battleCry") {
+      if (input.wPressed) {
+        this.state = STATES.BATTLE_CRY;
+        return;
+      }
+    } else if (skillTypes.w === "fluidState") {
+      if (input.wPressed) {
+        this.state = STATES.FLUID;
+        return;
+      }
+    } else if (input.wPressed) {
       this.state = STATES.PARRYING;
       return;
     }
-    if (input.ePressed) {
+
+    if (skillTypes.e === "shieldCharge") {
+      if (input.ePressed) {
+        const eCharge = this._skills.eShieldCharge;
+        this._shieldCharge = { dx: Math.cos(this.angle), dy: Math.sin(this.angle), remaining: eCharge.DISTANCE };
+        this.state = STATES.SHIELD_CHARGE;
+      }
+    } else if (skillTypes.e === "divingSlam") {
+      if (input.eHeld) {
+        this.state = STATES.SLAM_CHARGE;
+        this.chargeTime = 0;
+      }
+    } else if (skillTypes.e === "blizzard") {
+      if (input.ePressed) {
+        this.state = STATES.BLIZZARD;
+      }
+    } else if (input.ePressed) {
       this.state = STATES.KICKING;
     }
   }
@@ -250,10 +490,41 @@ export default class PredictedSelf {
       this._dash = this._dash || {
         dx: Math.cos(snap.angle),
         dy: Math.sin(snap.angle),
-        remaining: this._skills.qDash.MAX_DISTANCE,
+        // comboDash (Knight) has a flat DISTANCE, not a charge-scaled
+        // MAX_DISTANCE — guess whichever this class actually has.
+        remaining: this._skills.qDash.DISTANCE ?? this._skills.qDash.MAX_DISTANCE,
       };
     } else {
       this._dash = null;
+    }
+    // Knight E: same "no real value to reconstruct, precision doesn't
+    // matter" guess as DASH above — _stepShieldCharge doesn't self-end on
+    // distance either, only reconcile() moves us out of SHIELD_CHARGE.
+    if (snap.state === STATES.SHIELD_CHARGE) {
+      this._shieldCharge = this._shieldCharge || {
+        dx: Math.cos(snap.angle),
+        dy: Math.sin(snap.angle),
+        remaining: this._skills.eShieldCharge.DISTANCE,
+      };
+    } else {
+      this._shieldCharge = null;
+    }
+    // Warrior E: same "no real value to reconstruct, precision doesn't
+    // matter" guess as DASH/SHIELD_CHARGE above, derived from the still-
+    // valid synced chargeTime (the server never resets it through the slam
+    // sequence — see ArenaRoom.stepSlamCharge).
+    if (snap.state === STATES.SLAMMING) {
+      if (!this._slam) {
+        const slam = this._skills.divingSlam;
+        const ratio = snap.chargeTime / slam.MAX_CHARGE_MS;
+        this._slam = {
+          dx: Math.cos(snap.angle),
+          dy: Math.sin(snap.angle),
+          remaining: slam.MIN_LEAP_DISTANCE + (slam.MAX_LEAP_DISTANCE - slam.MIN_LEAP_DISTANCE) * ratio,
+        };
+      }
+    } else {
+      this._slam = null;
     }
     this.state = snap.state;
 

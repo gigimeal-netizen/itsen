@@ -23,13 +23,19 @@ npm start     # node index.js — listens on ws://localhost:2567 (or $PORT)
   list as features get added — most recently `classId`, see below).
 - **`constants.js`** — hand-kept-in-sync copy of `../src/config/constants.js`'s tuning values (CommonJS,
   can't `import` the client's ES module version). Edit both when changing a shared value. Q/W/E tuning
-  (`Q_DASH`/`W_PARRY`/`E_KICK`) now lives per-class in a `CLASSES` table, looked up via `classSkills(classId)`
-  — today there's only one class ("swordsman"), and the bare `Q_DASH`/`W_PARRY`/`E_KICK` exports just alias
-  its entry so most call sites are unaffected; skill-logic code (`ArenaRoom.js`,
-  `../src/net/PredictedSelf.js`, `../src/net/NetFighter.js`, `../src/entities/Combatant.js`) reads through
-  `classSkills(player.classId)` instead of the bare constants so a second class only needs a new table entry.
+  (`Q_DASH`/`W_PARRY`/`E_KICK`) lives per-class in a `CLASSES` table, looked up via `classSkills(classId)`
+  — swordsman, knight (기사), and warrior (전사) are ported to multiplayer so far (mage isn't yet), and the
+  bare `Q_DASH`/`W_PARRY`/`E_KICK` exports just alias swordsman's entry so its own call sites are
+  unaffected; skill-logic code (`ArenaRoom.js`, `../src/net/PredictedSelf.js`, `../src/net/NetFighter.js`,
+  `../src/entities/Combatant.js`) reads through `classSkills(player.classId)` instead of the bare
+  constants so a new class only needs a new table entry. `ArenaRoom.js` also has a generic
+  `isInvincible(player, s)`/`bypassInvincible` guard threaded through `kill`/`applyStun`/`applyKnockback`
+  (added for warrior's battle cry) that any future class's invincibility-granting skill can reuse.
 - **`layoutGenerator.js`** — hand-kept-in-sync CommonJS twin of `../src/config/layoutGenerator.js`
   (symmetric arena hazard layout).
+- **`bot.js`** — manual-testing helper, not part of the game itself: connects to a running server as a
+  real client and drives random movement + random Q/W/E taps/holds (`npm run bot`, or `node bot.js
+  [classId] [nickname]`), so hit-interactions can be tested solo instead of needing two browser tabs.
 - **`Dockerfile`** / **`.dockerignore`** / **`.env.example`** — deploy scaffolding; port comes from
   `process.env.PORT` (falls back to 2567).
 
