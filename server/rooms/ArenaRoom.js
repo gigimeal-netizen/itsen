@@ -1505,6 +1505,25 @@ class ArenaRoom extends Room {
     this._onPlayerDied(killerSessionId);
   }
 
+  // Shared by every Q-family hit-check (checkDashHits/checkComboAttack/
+  // checkEmpoweredStrike) for the "attack lands on a PARRYING target"
+  // outcome: stuns the attacker, exempts the defender's own GCD, and (for
+  // heldGuard classes) grants the empowered-Q buff — mirrors Combatant.
+  // parrySuccess() being the single call site every single-player attack-
+  // vs-guard check routes through. Keep new Q-family attack types calling
+  // this instead of re-inlining the four lines, so the buff grant can't
+  // silently go missing from just one of them again (as checkComboAttack/
+  // checkEmpoweredStrike previously did before this helper existed).
+  _grantParryCounter(attacker, as, defender, ds) {
+    ds.parrySuccess = true;
+    defender.state = C.STATES.IDLE; // exempt from GCD
+    this.applyStun(attacker, as, C.STUN_DURATION_MS);
+    if (C.classSkills(defender.classId).skillTypes.w === "heldGuard") {
+      ds.empoweredQMs = C.classSkills(defender.classId).empoweredQBuff.DURATION_MS;
+      defender.empoweredQActive = true;
+    }
+  }
+
   // Class-agnostic: reads the outcome fields resolved onto ds.dash at
   // release time (see stepCharging/startComboDash) instead of assuming
   // every Q dash is an instakill piercing hit — swordsman's dash is
@@ -1523,18 +1542,7 @@ class ArenaRoom extends Room {
 
         const os = this.scratch.get(otherId);
         if (other.state === C.STATES.PARRYING) {
-          if (!os.parrySuccess) {
-            os.parrySuccess = true;
-            other.state = C.STATES.IDLE; // exempt from GCD
-            this.applyStun(dasher, ds, C.STUN_DURATION_MS);
-            // Knight's held guard: a successful block grants an empowered-Q
-            // buff that redirects the next Q tap into a stationary instakill
-            // line-AOE — mirrors Combatant.parrySuccess()'s heldGuard branch.
-            if (C.classSkills(other.classId).skillTypes.w === "heldGuard") {
-              os.empoweredQMs = C.classSkills(other.classId).empoweredQBuff.DURATION_MS;
-              other.empoweredQActive = true;
-            }
-          }
+          if (!os.parrySuccess) this._grantParryCounter(dasher, ds, other, os);
           break; // dasher is stunned now (ds.dash is null); stop it piercing further targets
         } else if (other.state === C.STATES.DASH && ds.dash.lethal && os.dash.lethal) {
           // Both mid-dash, overlapping, and both lethal: a same-tick clash
@@ -1621,11 +1629,7 @@ class ArenaRoom extends Room {
 
         const ts = this.scratch.get(targetId);
         if (target.state === C.STATES.PARRYING) {
-          if (!ts.parrySuccess) {
-            ts.parrySuccess = true;
-            target.state = C.STATES.IDLE;
-            this.applyStun(attacker, as, C.STUN_DURATION_MS);
-          }
+          if (!ts.parrySuccess) this._grantParryCounter(attacker, as, target, ts);
           continue;
         }
 
@@ -1667,11 +1671,7 @@ class ArenaRoom extends Room {
 
         const ts = this.scratch.get(targetId);
         if (target.state === C.STATES.PARRYING) {
-          if (!ts.parrySuccess) {
-            ts.parrySuccess = true;
-            target.state = C.STATES.IDLE;
-            this.applyStun(attacker, as, C.STUN_DURATION_MS);
-          }
+          if (!ts.parrySuccess) this._grantParryCounter(attacker, as, target, ts);
           as.empoweredStrikeHitApplied = true;
           continue;
         }
