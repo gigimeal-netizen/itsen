@@ -1538,7 +1538,7 @@ export default class NetArenaScene extends Phaser.Scene {
     }
 
     if (st.matchPhase === "waiting") {
-      this._showRoundBanner(`다른 플레이어를 기다리는 중... (${st.players.size}/4)`);
+      this._showRoundBanner(`다른 플레이어를 기다리는 중... (${st.players.size}/${NET_MAX_PLAYERS})`);
     } else if (st.matchPhase === "countdown") {
       const elapsed = NET_COUNTDOWN_MS - st.phaseTimer;
       const step = NET_COUNTDOWN_MS / 4;
